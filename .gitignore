@@ -1,0 +1,4 @@
+*.o
+AMDcyclone
+test_*
+*.out
