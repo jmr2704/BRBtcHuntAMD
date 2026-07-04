@@ -560,6 +560,8 @@ __device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
 // ── Modular inverse (Fermat exponentiation, NO aliasing) ──────────────
 // Fermat inversion: compute a^(p-2) mod p using square-and-multiply
 __device__ __noinline__ void _ModInv(uint64_t* R) {
+    // Fermat inversion: compute a^(p-2) mod p using square-and-multiply
+    // (GCD version exists below but is disabled due to normalization bugs)
     if (R[0]==0 && R[1]==0 && R[2]==0 && R[3]==0) return;
     uint64_t res[NBBLOCK] = {1,0,0,0,0};
     uint64_t base[NBBLOCK] = {R[0],R[1],R[2],R[3],0};

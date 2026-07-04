@@ -41,7 +41,7 @@
 - [x] `fieldAdd` / `fieldSub` — carry chain com Clang builtins
 - [x] `fieldMul` — schoolbook __int128 (sem carry chain bugado)
 - [x] `fieldSqr` — schoolbook __int128
-- [x] `fieldInv` — Exponenciação de Fermat `a^(p-2) mod p`
+- [x] `fieldInv` — Exponenciação de Fermat `a^(p-2) mod p` (AddCh bug corrigido ✅)
 - [x] `pointDoubleAffine` — 2×G verificado contra Python
 - [x] `pointAddAffine` — G+G verificado contra Python
 - [x] `scalarMulBaseAffine` — k*G para chave conhecida 0x22382FACD0

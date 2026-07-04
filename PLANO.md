@@ -107,7 +107,7 @@ Baixa — ganho marginal depois do GCD.
 | Fase | Estimativa | Ganho | Status |
 |------|-----------|-------|--------|
 | 0. AddCh Bug Fix | 4h debug | ESSENCIAL | ✅ CONCLUÍDO |
-| 1. GCD Inversion (62-bit CUDACyclone) | 2-3h | 5-10× | ⏳ PRÓXIMO |
+| 1. GCD Inversion (62-bit CUDACyclone) | 2-3h debug | 5-10× (teórico) | ❌ BLOQUEADO |
 | 2. Montgomery Multiplication | 2-3h | 1.2× | ⏳ |
 | 3. GCN Inline Assembly | — | 0.33× (pior) | ❌ CANCELADO |
 | 4. Occupancy Tuning | 1h | 1.1× | ⏳ |
@@ -123,8 +123,30 @@ Baixa — ganho marginal depois do GCD.
    operações de inversão modular. Nada funcionava até consertar isso.
 
 3. **Binary GCD caseiro é traiçoeiro**: Signed arithmetic em 256-bit sem
-   espaço pra carry extra (257o bit) leva a bugs sutis. O algoritmo do
-   CUDACyclone usa 5 limbs (320 bits) justamente pra evitar isso.
+   espaço pra carry extra (257o bit) leva a bugs sutis.
+
+4. **GCD CUDACyclone (62-bit/iter) — funcional mas normalização quebrada**:
+   O loop GCD em si funciona (5-12 iterações), mas a normalização final
+   do resultado de 320-bit signed pra [0, p) é complexa. O `AddP/SubP`
+   ingênuo não funciona pra valores com r[4] muito negativo. A redução
+   via `r[0..3] + r[4] * 0x1000003D1 mod p` é a abordagem correta mas
+   precisa de implementação cuidadosa.
+
+## Por que o Fermat venceu (por enquanto)
+
+- **Simplicidade**: Square-and-multiply, 256 squarings + 128 mults, SEM
+  signed arithmetic, SEM carry shenanigans além das já existentes.
+- **Confiabilidade**: Após corrigir AddCh, funciona pra todos os valores.
+- **Performance aceitável**: ~500 Mkeys/s chega em 2^66/ano (~2^256/ano
+  com a taxa atual).
+- **GCD é frágil**: O algoritmo de Bernstein-Yang é eficiente mas frágil;
+  qualquer bug na carry chain ou na normalização quebra tudo.
+
+### Quando tentar o GCD novamente
+
+- Se a performance do Fermat se mostrar insuficiente
+- Com um testbench mais completo (comparação com Fermat pra cada valor)
+- Possivelmente em C++ host (não device) pra debug mais fácil
 
 ---
 
