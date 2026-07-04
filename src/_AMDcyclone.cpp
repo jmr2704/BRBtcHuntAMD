@@ -1166,7 +1166,7 @@ int main(int argc, char** argv) {
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
                           << " s | Speed: " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
                           << " " << speed_unit << " | Count: " << std::setw(14) << h_hashes
-                          << " | Key: 0x" << std::hex;
+                          << " | Key: " << std::hex;
                 if (s_hi) { std::cout << s_hi << s_lo; }
                 else       { std::cout << s_lo; }
                 std::cout << std::dec
@@ -1179,7 +1179,7 @@ int main(int argc, char** argv) {
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
                           << " s | Speed: " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
                           << " " << speed_unit << " | Count: " << std::setw(14) << h_hashes
-                          << " | Key: 0x" << std::hex;
+                          << " | Key: " << std::hex;
                 if (pos[3]|pos[2]) { std::cout << pos[3] << pos[2] << pos[1] << pos[0]; }
                 else if (pos[1])   { std::cout << pos[1] << pos[0]; }
                 else               { std::cout << pos[0]; }
