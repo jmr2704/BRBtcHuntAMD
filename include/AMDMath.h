@@ -427,10 +427,19 @@ __device__ void MatrixVecMul(uint64_t u[5],uint64_t v[5],
 }
 
 __device__ uint64_t AddCh(uint64_t r[5],uint64_t a[5],uint64_t carry_in) {
-  uint64_t carry=carry_in,carryOut;
-  UADDO1(r[0],a[0]); UADDC1(r[1],a[1]); UADDC1(r[2],a[2]);
-  UADDC1(r[3],a[3]); UADDC1(r[4],a[4]); UADD(carryOut,carry,0ULL);
-  return carryOut;
+  uint64_t carry=carry_in;
+  uint64_t carry_out;
+  UADDO1(r[0],a[0]);
+  carry_out = carry;
+  UADDC1(r[1],a[1]);
+  carry_out = carry;
+  UADDC1(r[2],a[2]);
+  carry_out = carry;
+  UADDC1(r[3],a[3]);
+  carry_out = carry;
+  UADDC1(r[4],a[4]);
+  carry_out = carry;
+  return carry_in + carry_out;
 }
 
 
@@ -549,12 +558,13 @@ __device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
 }
 
 // ── Modular inverse (Fermat exponentiation, NO aliasing) ──────────────
+// Fermat inversion: compute a^(p-2) mod p using square-and-multiply
 __device__ __noinline__ void _ModInv(uint64_t* R) {
     if (R[0]==0 && R[1]==0 && R[2]==0 && R[3]==0) return;
     uint64_t res[NBBLOCK] = {1,0,0,0,0};
     uint64_t base[NBBLOCK] = {R[0],R[1],R[2],R[3],0};
-    uint64_t tmp[NBBLOCK];  // separate temp array to avoid aliasing
-    // p-2 in LE: limb0=0xFFFFFFFEFFFFFC2D, limb1..limb3=0xFFFFFFFFFFFFFFFF
+    uint64_t tmp[NBBLOCK];
+    // p-2 in LE (limb 0 = 0xFFFFFFFEFFFFFC2D)
     uint64_t exp[4] = {0xFFFFFFFEFFFFFC2DULL,0xFFFFFFFFFFFFFFFFULL,
                        0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL};
     bool started = false;
@@ -568,15 +578,15 @@ __device__ __noinline__ void _ModInv(uint64_t* R) {
                 started = true;
                 continue;
             }
-            _ModSqr(tmp, res);   // tmp = res^2  (no aliasing)
+            _ModSqr(tmp, res);
             res[0]=tmp[0]; res[1]=tmp[1]; res[2]=tmp[2]; res[3]=tmp[3];
             if (bit_set) {
-                _ModMult(tmp, res, base);  // tmp = res * base (3-param, no aliasing)
+                _ModMult(tmp, res, base);
                 res[0]=tmp[0]; res[1]=tmp[1]; res[2]=tmp[2]; res[3]=tmp[3];
             }
         }
     }
-    R[0] = res[0]; R[1] = res[1]; R[2] = res[2]; R[3] = res[3]; R[4] = 0;
+    R[0]=res[0]; R[1]=res[1]; R[2]=res[2]; R[3]=res[3]; R[4]=0;
 }
 
 // ── Field inversion ─────────────────────────────────────────────────────
