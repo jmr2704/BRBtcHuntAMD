@@ -1136,6 +1136,7 @@ int main(int argc, char** argv) {
     std::cout.flush();
 
     auto t0    = std::chrono::high_resolution_clock::now();
+    double total_elapsed = 0.0;
     auto tLast = t0;
     unsigned long long lastHashes = 0ull;
     long double total_keys_ld = ld_from_u256(range_len);
@@ -1149,7 +1150,8 @@ int main(int argc, char** argv) {
             unsigned long long h_hashes = shared.total_hashes.load(std::memory_order_relaxed);
             double delta  = (double)(h_hashes - lastHashes);
             double mkeys  = delta / (dt * 1e6);
-            double elapsed = std::chrono::duration<double>(now - t0).count();
+            total_elapsed = std::chrono::duration<double>(now - t0).count();
+            double elapsed = total_elapsed;
             long double prog = total_keys_ld > 0.0L
                                ? ((long double)h_hashes / total_keys_ld) * 100.0L : 0.0L;
             if (prog > 100.0L) prog = 100.0L;
@@ -1200,19 +1202,37 @@ int main(int argc, char** argv) {
 
     int exit_code = EXIT_SUCCESS;
 
+    auto print_summary = [&]() {
+        unsigned long long h_total = shared.total_hashes.load(std::memory_order_relaxed);
+        if (h_total == 0) return;
+        double avg_speed = total_elapsed > 0.0 ? (double)h_total / total_elapsed / 1e6 : 0.0;
+        const char* avg_unit = "Mkeys/s";
+        double avg_disp = avg_speed;
+        if (avg_disp >= 1000000.0) { avg_disp /= 1000000.0; avg_unit = "Tkeys/s"; }
+        else if (avg_disp >= 1000.0) { avg_disp /= 1000.0; avg_unit = "Gkeys/s"; }
+        std::cout << "\n--- Summary ---\n";
+        std::cout << "Total keys  : " << h_total << "\n";
+        std::cout << "Time        : " << std::fixed << std::setprecision(2) << total_elapsed << " s\n";
+        std::cout << "Avg speed   : " << std::fixed << std::setprecision(2) << avg_disp << " " << avg_unit << "\n";
+    };
+
     if (shared.has_result) {
         std::cout << "\n======== FOUND MATCH! =================================\n";
         std::cout << "Private Key   : " << formatHex256(shared.best_result.scalar) << "\n";
         std::cout << "Public Key    : " << formatCompressedPubHex(shared.best_result.Rx, shared.best_result.Ry) << "\n";
+        print_summary();
     } else if (g_sigint) {
         std::cout << "======== INTERRUPTED (Ctrl+C) ==========================\n";
         std::cout << "Search was interrupted by user. Partial progress above.\n";
+        print_summary();
         exit_code = 130;
     } else if (shared.gpus_exhausted.load() >= num_gpus) {
         std::cout << "======== KEY NOT FOUND (exhaustive) ===================\n";
         std::cout << "Target hash160 was not found within the specified range.\n";
+        print_summary();
     } else {
         std::cout << "======== TERMINATED ===================================\n";
+        print_summary();
     }
 
     return exit_code;
