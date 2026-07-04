@@ -395,6 +395,8 @@ struct GpuShared {
     std::atomic<unsigned long long> chunks_tried{0};
     std::atomic<int>                gpus_exhausted{0};
     std::atomic<int>                init_done{0};
+    std::atomic<uint64_t>           cur_scalar_lo{0};
+    std::atomic<uint64_t>           cur_scalar_hi{0};
 };
 
 static std::mutex g_print_mutex;
@@ -518,6 +520,8 @@ static void run_on_gpu(
             uint64_t next[4]; add256(cur, per_thread_cnt, next);
             cur[0]=next[0]; cur[1]=next[1]; cur[2]=next[2]; cur[3]=next[3];
         }
+        shared.cur_scalar_lo.store(h_start_scalars[0], std::memory_order_relaxed);
+        shared.cur_scalar_hi.store(h_start_scalars[1], std::memory_order_relaxed);
     }
 
     // Device buffers
@@ -729,6 +733,8 @@ static void run_on_gpu(
             h_counts256[i*4+2] = per_thread_cnt[2];
             h_counts256[i*4+3] = per_thread_cnt[3];
         }
+        shared.cur_scalar_lo.store(h_start_scalars[0], std::memory_order_relaxed);
+        shared.cur_scalar_hi.store(h_start_scalars[1], std::memory_order_relaxed);
         hipMemcpy(d_start_scalars, h_start_scalars.data(),
                    threadsTotal * 4 * sizeof(uint64_t), hipMemcpyHostToDevice);
         hipMemcpy(d_counts256,     h_counts256.data(),
@@ -1155,14 +1161,29 @@ int main(int argc, char** argv) {
 
             if (random_mode) {
                 unsigned long long chunks = shared.chunks_tried.load(std::memory_order_relaxed);
+                uint64_t s_lo = shared.cur_scalar_lo.load(std::memory_order_relaxed);
+                uint64_t s_hi = shared.cur_scalar_hi.load(std::memory_order_relaxed);
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
                           << " s | Speed: " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
                           << " " << speed_unit << " | Count: " << std::setw(14) << h_hashes
+                          << " | Key: 0x" << std::hex;
+                if (s_hi) { std::cout << s_hi << s_lo; }
+                else       { std::cout << s_lo; }
+                std::cout << std::dec
                           << " | Chunks: " << std::setw(6) << chunks << "   ";
             } else {
+                // Current position = range_start + total_hashes (sequential scan)
+                uint64_t pos[4];
+                add256_u64(range_start, h_hashes, pos);
+                // Show upper 128 bits only if non-zero, else show lower 64
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
                           << " s | Speed: " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
                           << " " << speed_unit << " | Count: " << std::setw(14) << h_hashes
+                          << " | Key: 0x" << std::hex;
+                if (pos[3]|pos[2]) { std::cout << pos[3] << pos[2] << pos[1] << pos[0]; }
+                else if (pos[1])   { std::cout << pos[1] << pos[0]; }
+                else               { std::cout << pos[0]; }
+                std::cout << std::dec
                           << " | Progress: " << std::fixed << std::setprecision(2) << std::setw(6) << (double)prog << " %   ";
             }
             std::cout.flush();
