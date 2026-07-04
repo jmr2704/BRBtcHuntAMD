@@ -397,6 +397,7 @@ struct GpuShared {
     std::atomic<int>                init_done{0};
     std::atomic<uint64_t>           cur_scalar_lo{0};
     std::atomic<uint64_t>           cur_scalar_hi{0};
+    std::atomic<int>                setup_done{0};
 };
 
 static std::mutex g_print_mutex;
@@ -743,6 +744,7 @@ static void run_on_gpu(
         scalarMulKernelBase<<<bs, threadsPerBlock>>>(d_start_scalars, d_Px, d_Py, (int)threadsTotal);
         hipDeviceSynchronize();
     };
+    shared.setup_done.store(1, std::memory_order_release);
 
     while (!stop_all) {
         if (shared.any_found.load(std::memory_order_relaxed)) break;
@@ -1161,7 +1163,9 @@ int main(int argc, char** argv) {
             if (speed_val >= 1000000.0) { speed_val /= 1000000.0; speed_unit = "Tkeys/s"; }
             else if (speed_val >= 1000.0) { speed_val /= 1000.0;  speed_unit = "Gkeys/s"; }
 
-            if (random_mode) {
+            if (!shared.setup_done.load(std::memory_order_relaxed)) {
+                std::cout << "\rInitializing EC points... " << std::fixed << std::setprecision(1) << elapsed << " s     ";
+            } else if (random_mode) {
                 unsigned long long chunks = shared.chunks_tried.load(std::memory_order_relaxed);
                 uint64_t s_lo = shared.cur_scalar_lo.load(std::memory_order_relaxed);
                 uint64_t s_hi = shared.cur_scalar_hi.load(std::memory_order_relaxed);
