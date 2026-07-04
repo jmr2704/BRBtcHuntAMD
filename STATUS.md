@@ -1,4 +1,4 @@
-# AMDcyclone — Status
+# BRBtcHuntAMD — Status
 
 ## 🎯 Port: CUDACyclone → AMD ROCm/HIP
 

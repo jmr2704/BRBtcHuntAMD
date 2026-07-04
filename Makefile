@@ -1,7 +1,7 @@
-# ── Makefile — AMDcyclone (HIP/ROCm port of CUDACyclone) ────────────────
+# ── Makefile — BRBtcHuntAMD (HIP/ROCm port of CUDACyclone) ────────────
 # Targets: AMD Radeon RX 6600 (gfx1032), Vega iGPU (gfx90c)
 
-TARGET      := AMDcyclone
+TARGET      := BRBtcHuntAMD
 SRC_DIR     := src
 INC_DIR     := include
 

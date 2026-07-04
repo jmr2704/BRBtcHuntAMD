@@ -1,4 +1,4 @@
-// AMDcyclone — single compilation unit
+// BRBtcHuntAMD — single compilation unit
 // Includes both the main code and hash implementations
 
 #include "_AMDcyclone.cpp"

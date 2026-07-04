@@ -912,7 +912,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
-            std::cout << "CUDACyclone v1.4 — GPU Satoshi Puzzle Solver\n"
+            std::cout << "BRBtcHuntAMD — GPU Satoshi Puzzle Solver (ROCm/HIP)\n"
                       << "\n"
                       << "Usage: " << argv[0]
                       << " --range <start_hex>:<end_hex> --address <base58>\n"
@@ -931,9 +931,9 @@ int main(int argc, char** argv) {
                       << "  -h, --help                 Show this help\n"
                       << "\n"
                       << "Examples:\n"
-                      << "  ./CUDACyclone --range 200000000:3FFFFFFFF --address 1HBtAp... --grid 128,128\n"
-                      << "  ./CUDACyclone --range 200000000:3FFFFFFFF --address 1HBtAp... --gpus 0,1 --random --slices 16\n"
-                      << "  ./CUDACyclone --range 200000000:3FFFFFFFF --address 1HBtAp... --gpus 0\n"
+                      << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --grid 128,128\n"
+                      << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --gpus 0,1 --random --slices 16\n"
+                      << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --gpus 0\n"
                       << "\n"
                       << "Multi-GPU: auto-detects all CUDA GPUs. Use --gpus to select specific ones.\n"
                       << "Random mode: each GPU independently jumps to random positions.\n"

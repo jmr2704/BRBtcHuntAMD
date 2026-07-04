@@ -241,14 +241,14 @@ def main() -> None:
     )
     parser.add_argument("--range", "-r", dest="range_arg", required=True,
                         help="HEX range START:END (e.g. 200000000:3FFFFFFFF)")
-    parser.add_argument("--cyclone-path", "-c", dest="cyclone_path", default="./CUDACyclone",
-                        help="Path to CUDACyclone binary")
+    parser.add_argument("--cyclone-path", "-c", dest="cyclone_path", default="./BRBtcHuntAMD",
+                        help="Path to BRBtcHuntAMD binary")
     parser.add_argument("--grid", dest="grid_arg", default="512,512",
-                        help="Value for --grid passed to CUDACyclone (e.g. 512,512)")
+                        help="Value for --grid passed to BRBtcHuntAMD (e.g. 512,512)")
     parser.add_argument("--batch", dest="batch", type=int, default=None,
                         help="Override batch size (first number of --grid). Must be even.")
     parser.add_argument("--timeout", dest="timeout", type=int, default=None,
-                        help="Optional timeout in seconds for each CUDACyclone run")
+                        help="Optional timeout in seconds for each BRBtcHuntAMD run")
     parser.add_argument("--start-count", type=int, default=128,
                         help="Count per parity at range start (default: 128)")
     parser.add_argument("--end-count", type=int, default=128,
