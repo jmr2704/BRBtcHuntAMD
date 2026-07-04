@@ -1095,15 +1095,25 @@ int main(int argc, char** argv) {
     GpuShared shared;
     std::atomic<int> gpus_running{num_gpus};
 
-    // DIRECT call instead of threaded (debugging hang)
-    int dev = selected_gpus[0];
-    run_on_gpu(dev,
-               gpu_starts[0].data(), gpu_ends[0].data(),
-               target_hash160,
-               runtime_points_batch_size, runtime_batches_per_sm, slices_per_launch,
-               random_mode,
-               shared);
-    gpus_running.fetch_sub(1, std::memory_order_relaxed);
+    // Launch worker threads
+    std::vector<std::thread> workers;
+    uint8_t target_copy[20];
+    memcpy(target_copy, target_hash160, 20);
+    for (int gi = 0; gi < num_gpus; ++gi) {
+        int dev = selected_gpus[gi];
+        workers.emplace_back([dev, gi, &gpu_starts, &gpu_ends, target_copy,
+                              runtime_points_batch_size, runtime_batches_per_sm,
+                              slices_per_launch, random_mode, &shared, &gpus_running]()
+        {
+            run_on_gpu(dev,
+                       gpu_starts[gi].data(), gpu_ends[gi].data(),
+                       target_copy,
+                       runtime_points_batch_size, runtime_batches_per_sm, slices_per_launch,
+                       random_mode,
+                       shared);
+            gpus_running.fetch_sub(1, std::memory_order_relaxed);
+        });
+    }
 
     std::cout << "\n======== Phase-1: " << (random_mode ? "Lottery / Random Jump" : "BruteForce") << " ("
               << num_gpus << " GPU" << (num_gpus > 1 ? "s" : "") << ") =====\n";
@@ -1117,6 +1127,8 @@ int main(int argc, char** argv) {
         std::cout << "(random mode: ~" << ck_s
                   << " keys/thread per chunk; lower --slices = more frequent jumps)\n";
     }
+    // Join worker threads
+    for (auto& t : workers) { if (t.joinable()) t.join(); }
     std::cout.flush();
 
     auto t0    = std::chrono::high_resolution_clock::now();
