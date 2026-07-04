@@ -1178,18 +1178,9 @@ int main(int argc, char** argv) {
                 std::cout << std::dec
                           << " | Chunks: " << std::setw(6) << chunks << "   ";
             } else {
-                // Current position = range_start + total_hashes (sequential scan)
-                uint64_t pos[4];
-                add256_u64(range_start, h_hashes, pos);
-                // Show upper 128 bits only if non-zero, else show lower 64
                 std::cout << "\rTime: " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
                           << " s | Speed: " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
                           << " " << speed_unit << " | Count: " << std::setw(14) << h_hashes
-                          << " | Key: " << std::hex;
-                if (pos[3]|pos[2]) { std::cout << pos[3] << pos[2] << pos[1] << pos[0]; }
-                else if (pos[1])   { std::cout << pos[1] << pos[0]; }
-                else               { std::cout << pos[0]; }
-                std::cout << std::dec
                           << " | Progress: " << std::fixed << std::setprecision(2) << std::setw(6) << (double)prog << " %   ";
             }
             std::cout.flush();
