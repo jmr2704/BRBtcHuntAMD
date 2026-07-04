@@ -1127,8 +1127,6 @@ int main(int argc, char** argv) {
         std::cout << "(random mode: ~" << ck_s
                   << " keys/thread per chunk; lower --slices = more frequent jumps)\n";
     }
-    // Join worker threads
-    for (auto& t : workers) { if (t.joinable()) t.join(); }
     std::cout.flush();
 
     auto t0    = std::chrono::high_resolution_clock::now();
@@ -1173,6 +1171,9 @@ int main(int argc, char** argv) {
 
         if (g_sigint) break;
     }
+
+    // Only join workers after progress loop
+    for (auto& t : workers) { if (t.joinable()) t.join(); }
 
     std::cout << "\n";
 
