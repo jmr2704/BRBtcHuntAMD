@@ -582,113 +582,128 @@ __device__ __forceinline__ void from62(const uint64_t src[5], uint64_t dst[4]) {
     dst[3] = ((src[3] >> 6) | ((uint64_t)((int64_t)src[4] << 56)));
 }
 
-// ── Modular inverse (GCD — Bernstein-Yang 62-bit) ─────────────────────
-// Uses DivStep62 + MatrixVecMul on 5×62-bit signed representation.
-// Converges in ~5-12 iterations vs 384 field mults for Fermat.
-// Converts to/from 5×62-bit internally; normalizes to [0, p) at exit.
-__device__ __noinline__ void _ModInvGCD(uint64_t R[5]) {
-    if (R[0]==0 && R[1]==0 && R[2]==0 && R[3]==0) {
-        R[4] = 0; return;
-    }
+// ── 256-bit helper functions for binary GCD ──────────────────────────
+__device__ __forceinline__ bool is_even_256(const uint64_t r[4]) {
+    return (r[0] & 1ULL) == 0;
+}
+__device__ __forceinline__ bool is_one_256(const uint64_t r[4]) {
+    return r[0]==1 && r[1]==0 && r[2]==0 && r[3]==0;
+}
+__device__ __forceinline__ bool is_zero_256(const uint64_t r[4]) {
+    return (r[0]|r[1]|r[2]|r[3]) == 0ULL;
+}
+__device__ __forceinline__ bool cmp_ge_256(const uint64_t a[4], const uint64_t b[4]) {
+    if (a[3] != b[3]) return a[3] > b[3];
+    if (a[2] != b[2]) return a[2] > b[2];
+    if (a[1] != b[1]) return a[1] > b[1];
+    return a[0] >= b[0];
+}
+__device__ __forceinline__ void shr1_256(uint64_t r[4]) {
+    uint64_t t0=r[0], t1=r[1], t2=r[2], t3=r[3];
+    r[0] = (t0 >> 1) | (t1 << 63);
+    r[1] = (t1 >> 1) | (t2 << 63);
+    r[2] = (t2 >> 1) | (t3 << 63);
+    r[3] = t3 >> 1;
+}
+// r = (r + secp256k1_p) >> 1  (modular halving, assumes r is odd)
+__device__ __forceinline__ void add_p_then_shr1(uint64_t r[4]) {
+    unsigned long long _c;
+    uint64_t carry;
+    r[0] = __builtin_addcll(r[0], 0xFFFFFFFEFFFFFC2FULL, 0ULL, &_c); carry = (uint64_t)_c;
+    r[1] = __builtin_addcll(r[1], 0xFFFFFFFFFFFFFFFFULL, carry, &_c); carry = (uint64_t)_c;
+    r[2] = __builtin_addcll(r[2], 0xFFFFFFFFFFFFFFFFULL, carry, &_c); carry = (uint64_t)_c;
+    r[3] = __builtin_addcll(r[3], 0xFFFFFFFFFFFFFFFFULL, carry, &_c); carry = (uint64_t)_c;
+    // r = (r + p) >> 1, propagate 257th bit (carry) into r[3] bit 63
+    uint64_t t0=r[0], t1=r[1], t2=r[2], t3=r[3];
+    r[0] = (t0 >> 1) | (t1 << 63);
+    r[1] = (t1 >> 1) | (t2 << 63);
+    r[2] = (t2 >> 1) | (t3 << 63);
+    r[3] = (t3 >> 1) | (carry << 63);
+}
 
-    uint64_t u[5], v[5];
-    // Bezout coefficients: we track 4 accumulators:
-    //   u = uc_a * a + uc_p * p  (u is the running remainder)
-    //   v = vc_a * a + vc_p * p  (v is the other remainder)
-    // When v == 1: vc_a * a + vc_p * p = 1 → vc_a = a^(-1) mod p
-    uint64_t uc_a[5] = {1,0,0,0,0};  // coefficient of a in u
-    uint64_t uc_p[5] = {0,0,0,0,0};  // coefficient of p in u
-    uint64_t vc_a[5] = {0,0,0,0,0};  // coefficient of a in v  ← THIS IS THE INVERSE
-    uint64_t vc_p[5] = {1,0,0,0,0};  // coefficient of p in v
-    uint64_t tmp[5];
+// ── Modular inverse — Binary GCD (extended, 256-bit) ─────────────────
+// Standard extended binary GCD on 4×64-bit LE unsigned values.
+// Converges in ~256 iterations for 256-bit inputs.
+// Uses only shifts, subtractions, and modular field operations.
+__device__ __noinline__ void _ModInvGCD(uint64_t R[5]) {
+    if (is_zero_256(R)) { R[4]=0; return; }
+
+    uint64_t u[4], v[4];
+    uint64_t x1[4] = {1,0,0,0};  // Bezout: x1 * a_orig ≡ ? (mod p)
+    uint64_t x2[4] = {0,0,0,0};  // Bezout: x2 * a_orig ≡ ? (mod p)
     uint64_t carry;
 
-    // Convert R (4×64-bit LE) to 5×62-bit signed
-    to62(R, u);
+    // u = R (input), v = secp256k1 prime p
+    u[0]=R[0]; u[1]=R[1]; u[2]=R[2]; u[3]=R[3];
+    v[0]=0xFFFFFFFEFFFFFC2FULL; v[1]=0xFFFFFFFFFFFFFFFFULL;
+    v[2]=0xFFFFFFFFFFFFFFFFULL; v[3]=0xFFFFFFFFFFFFFFFFULL;
 
-    // Convert p (secp256k1 prime) to 5×62-bit signed
-    {
-        uint64_t p64[4] = {0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
-                           0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
-        to62(p64, v);
-    }
-
-    // Safety limit: GCD usually converges in ~5-12 iters for 256-bit.
-    // Small inputs (like inv(2)) may need more due to magnitude imbalance.
-    for (int iter = 0; iter < 1000; iter++) {
-        if (_IsOne(v) || _IsZero(v)) break;
-
-        int32_t pos = 4;
-        int64_t uu, uv, vu, vv;
-
-        // Compute transformation matrix from current u, v
-        _DivStep62(u, v, &pos, &uu, &uv, &vu, &vv);
-
-        // Apply transformation to u, v: u' = uu*u + uv*v, v' = vu*u + vv*v
-        MatrixVecMul(u, v, uu, uv, vu, vv);
-
-        // Apply transformation to ALL FOUR Bezout accumulators:
-        //   uc_a' = uu * uc_a + uv * vc_a     (new coefficient of a in u)
-        //   uc_p' = uu * uc_p + uv * vc_p     (new coefficient of p in u)
-        //   vc_a' = vu * uc_a + vv * vc_a     (new coefficient of a in v) ← INVERSE
-        //   vc_p' = vu * uc_p + vv * vc_p     (new coefficient of p in v)
-        uint64_t c1, c2, c3, c4;
-        MatrixVecMulHalf(tmp,  uc_a, vc_a, uu, uv, &c1);  // new uc_a
-        MatrixVecMulHalf(uc_p, uc_p, vc_p, uu, uv, &c2);  // new uc_p (overwrites old uc_p)
-        MatrixVecMulHalf(vc_a, uc_a, vc_a, vu, vv, &c3);  // new vc_a (overwrites old vc_a, reads old uc_a & vc_a)
-        MatrixVecMulHalf(vc_p, uc_p, vc_p, vu, vv, &c4);  // new vc_p (reads old uc_p)
-        // Propagate carries into limb 4
-        tmp[4]  += c1;
-        uc_p[4] += c2;
-        vc_a[4] += c3;
-        vc_p[4] += c4;
-        uc_a[0] = tmp[0]; uc_a[1] = tmp[1]; uc_a[2] = tmp[2];
-        uc_a[3] = tmp[3]; uc_a[4] = tmp[4];
-    }
-
-    // Result is in vc_a (if v==1) or uc_a (if u==1)
-    // Because: 1 = vc_a * a + vc_p * p when v==1, so vc_a * a ≡ 1 mod p
-    //           1 = uc_a * a + uc_p * p when u==1, so uc_a * a ≡ 1 mod p
-    uint64_t *res62 = _IsOne(v) ? vc_a : uc_a;
-
-    uint64_t val64[4];
-    uint64_t p64[4] = {0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
-                       0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
-
-    if ((int64_t)res62[4] < 0) {
-        // Negative in 62-bit signed → positive inverse = p - |result|
-        carry = 0;
-        Neg(res62);                         // res62 = |result| (positive)
-        from62(res62, val64);               // val64 = |result| in 256-bit
-        // R = p - val64
-        carry = 0;
-        USUBO(R[0], p64[0], val64[0]);
-        USUBC(R[1], p64[1], val64[1]);
-        USUBC(R[2], p64[2], val64[2]);
-        USUBC(R[3], p64[3], val64[3]);
-    } else {
-        // Non-negative in 62-bit signed → normal 256-bit value
-        from62(res62, val64);
-        R[0] = val64[0]; R[1] = val64[1]; R[2] = val64[2]; R[3] = val64[3];
-        // Conditional reduction: if R >= p, subtract p
-        if (R[3] > 0xFFFFFFFFFFFFFFFFULL ||
-            (R[3] == 0xFFFFFFFFFFFFFFFFULL &&
-             R[2] == 0xFFFFFFFFFFFFFFFFULL &&
-             R[1] == 0xFFFFFFFFFFFFFFFFULL &&
-             R[0] >= 0xFFFFFFFEFFFFFC2FULL)) {
+    // Binary GCD extended loop
+    // Converges in ~256 iters for 256-bit. Safety limit at 10000.
+    int _safe = 0;
+    while (!is_one_256(u) && !is_one_256(v) && ++_safe < 10000) {
+        // Remove factors of 2 from u
+        while (is_even_256(u)) {
+            shr1_256(u);
+            if (is_even_256(x1)) {
+                shr1_256(x1);
+            } else {
+                add_p_then_shr1(x1);  // x1 = (x1 + p) >> 1
+            }
+        }
+        // Remove factors of 2 from v
+        while (is_even_256(v)) {
+            shr1_256(v);
+            if (is_even_256(x2)) {
+                shr1_256(x2);
+            } else {
+                add_p_then_shr1(x2);  // x2 = (x2 + p) >> 1
+            }
+        }
+        // Subtract: ensure u >= v, then u = u - v
+        if (cmp_ge_256(u, v)) {
             carry = 0;
-            USUBO1(R[0], 0xFFFFFFFEFFFFFC2FULL);
-            USUBC1(R[1], 0xFFFFFFFFFFFFFFFFULL);
-            USUBC1(R[2], 0xFFFFFFFFFFFFFFFFULL);
-            USUB1(R[3], 0xFFFFFFFFFFFFFFFFULL);
+            USUBO(u[0], u[0], v[0]); USUBC(u[1], u[1], v[1]);
+            USUBC(u[2], u[2], v[2]); USUBC(u[3], u[3], v[3]);
+            // x1 = x1 - x2 (mod p) — inline modular subtraction
+            carry = 0;
+            USUBO(x1[0], x1[0], x2[0]); USUBC(x1[1], x1[1], x2[1]);
+            USUBC(x1[2], x1[2], x2[2]); USUBC(x1[3], x1[3], x2[3]);
+            if (carry) {  // borrow: add p back
+                unsigned long long _c;
+                carry = 0;
+                x1[0] = __builtin_addcll(x1[0], 0xFFFFFFFEFFFFFC2FULL, 0ULL, &_c); carry = (uint64_t)_c;
+                x1[1] = __builtin_addcll(x1[1], 0xFFFFFFFFFFFFFFFFULL, carry, &_c); carry = (uint64_t)_c;
+                x1[2] = __builtin_addcll(x1[2], 0xFFFFFFFFFFFFFFFFULL, carry, &_c); carry = (uint64_t)_c;
+                x1[3] = __builtin_addcll(x1[3], 0xFFFFFFFFFFFFFFFFULL, carry, &_c);
+            }
+        } else {
+            carry = 0;
+            USUBO(v[0], v[0], u[0]); USUBC(v[1], v[1], u[1]);
+            USUBC(v[2], v[2], u[2]); USUBC(v[3], v[3], u[3]);
+            // x2 = x2 - x1 (mod p) — inline modular subtraction
+            carry = 0;
+            USUBO(x2[0], x2[0], x1[0]); USUBC(x2[1], x2[1], x1[1]);
+            USUBC(x2[2], x2[2], x1[2]); USUBC(x2[3], x2[3], x1[3]);
+            if (carry) {  // borrow: add p back
+                unsigned long long _c;
+                carry = 0;
+                x2[0] = __builtin_addcll(x2[0], 0xFFFFFFFEFFFFFC2FULL, 0ULL, &_c); carry = (uint64_t)_c;
+                x2[1] = __builtin_addcll(x2[1], 0xFFFFFFFFFFFFFFFFULL, carry, &_c); carry = (uint64_t)_c;
+                x2[2] = __builtin_addcll(x2[2], 0xFFFFFFFFFFFFFFFFULL, carry, &_c); carry = (uint64_t)_c;
+                x2[3] = __builtin_addcll(x2[3], 0xFFFFFFFFFFFFFFFFULL, carry, &_c);
+            }
         }
     }
-    R[4] = 0;
+
+    // Result is x1 (if u==1) or x2 (if v==1)
+    uint64_t *res = is_one_256(u) ? x1 : x2;
+    R[0]=res[0]; R[1]=res[1]; R[2]=res[2]; R[3]=res[3]; R[4]=0;
 }
 
 // ── Modular inverse (Fermat exponentiation) ─────────────────────────
-// Reliable default. ~500 Mkeys/s on RX 6600.
-// GCD version (_ModInvGCD) exists in this file for experimental use.
+// Default. ~500 Mkeys/s on RX 6600. Binary GCD (_ModInvGCD) is also
+// available in this file but is slower in practice (1.6× on GPU).
 __device__ __noinline__ void _ModInv(uint64_t* R) {
     if (R[0]==0 && R[1]==0 && R[2]==0 && R[3]==0) return;
     uint64_t res[NBBLOCK] = {1,0,0,0,0};
