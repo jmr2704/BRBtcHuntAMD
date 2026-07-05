@@ -733,6 +733,277 @@ __device__ __noinline__ void _ModInv(uint64_t* R) {
     R[0]=res[0]; R[1]=res[1]; R[2]=res[2]; R[3]=res[3]; R[4]=0;
 }
 
+// ── Modular inverse (Bernstein-Yang Algorithm 1) ─────────────────────
+// Uses eprint 2019/266 Algorithm 1 with Bezout coefficients.
+// Tracks u,v,q,r as signed 5-limb values. ~550 iterations worst-case.
+// Invariant: f = u*a + v*P, g = q*a + r*P
+// When a coefficient is odd and must be divided by 2, we add P to
+// the 'a'-coefficient or subtract a from the 'P'-coefficient,
+// preserving the invariant since P*a - a*P = 0.
+__device__ __noinline__ void _ModInvBY(uint64_t* R) {
+    if ((R[0]|R[1]|R[2]|R[3])==0ULL) return;
+
+    // Input must be odd. If even, return 0 (caller must preprocess).
+    if ((R[0] & 1ULL) == 0ULL) {
+        R[0]=R[1]=R[2]=R[3]=R[4]=0ULL;
+        return;
+    }
+
+    uint64_t a_work[4] = {R[0],R[1],R[2],R[3]};
+
+    // ── State (5-limb signed) ──
+    uint64_t f[5] = {R[0],R[1],R[2],R[3],0ULL};
+    uint64_t g[5] = {0xFFFFFFFEFFFFFC2FULL,0xFFFFFFFFFFFFFFFFULL,
+                     0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL,0ULL};
+    uint64_t u[5] = {1ULL,0,0,0,0};
+    uint64_t v[5] = {0,0,0,0,0};
+    uint64_t qv[5] = {0,0,0,0,0};
+    uint64_t r[5] = {1ULL,0,0,0,0};
+
+    int32_t delta = 1;
+
+    // ── Shorthands for constants ──
+    const uint64_t p0 = 0xFFFFFFFEFFFFFC2FULL;
+    const uint64_t p1 = 0xFFFFFFFFFFFFFFFFULL;
+    const uint64_t p2 = 0xFFFFFFFFFFFFFFFFULL;
+    const uint64_t p3 = 0xFFFFFFFFFFFFFFFFULL;
+
+    for (int step = 0; step < 2000; step++) {
+        // Check termination: g==0 or f==±1
+        uint64_t gz = g[0]|g[1]|g[2]|g[3]|g[4];
+        uint64_t f1 = (f[0]==1ULL && (f[1]|f[2]|f[3]|f[4])==0ULL) ? 1ULL : 0ULL;
+        uint64_t fm1 = ((f[0] & f[1] & f[2] & f[3] & f[4]) == 0xFFFFFFFFFFFFFFFFULL) ? 1ULL : 0ULL;
+        if (gz==0ULL || f1 || fm1) break;
+
+        uint64_t carry;
+
+        if ((g[0] & 1ULL) == 0ULL) {
+            // ── g even ──
+            // g >>= 1
+            g[0] = (g[0]>>1ULL) | (g[1]<<63ULL);
+            g[1] = (g[1]>>1ULL) | (g[2]<<63ULL);
+            g[2] = (g[2]>>1ULL) | (g[3]<<63ULL);
+            g[3] = (g[3]>>1ULL) | (g[4]<<63ULL);
+            g[4] = ((int64_t)g[4]) >> 1;
+
+            if (qv[0] & 1ULL) {
+                // q = (q + P) >> 1
+                UADDO1(qv[0], p0); UADDC1(qv[1], p1);
+                UADDC1(qv[2], p2); UADDC1(qv[3], p3); UADD1(qv[4], 0ULL);
+                qv[0] = (qv[0]>>1ULL) | (qv[1]<<63ULL);
+                qv[1] = (qv[1]>>1ULL) | (qv[2]<<63ULL);
+                qv[2] = (qv[2]>>1ULL) | (qv[3]<<63ULL);
+                qv[3] = (qv[3]>>1ULL) | (qv[4]<<63ULL);
+                qv[4] = ((int64_t)qv[4]) >> 1;
+                // r = (r - a) >> 1
+                USUBO1(r[0], a_work[0]); USUBC1(r[1], a_work[1]);
+                USUBC1(r[2], a_work[2]); USUBC1(r[3], a_work[3]); USUB1(r[4], 0ULL);
+                r[0] = (r[0]>>1ULL) | (r[1]<<63ULL);
+                r[1] = (r[1]>>1ULL) | (r[2]<<63ULL);
+                r[2] = (r[2]>>1ULL) | (r[3]<<63ULL);
+                r[3] = (r[3]>>1ULL) | (r[4]<<63ULL);
+                r[4] = ((int64_t)r[4]) >> 1;
+            } else {
+                qv[0] = (qv[0]>>1ULL) | (qv[1]<<63ULL);
+                qv[1] = (qv[1]>>1ULL) | (qv[2]<<63ULL);
+                qv[2] = (qv[2]>>1ULL) | (qv[3]<<63ULL);
+                qv[3] = (qv[3]>>1ULL) | (qv[4]<<63ULL);
+                qv[4] = ((int64_t)qv[4]) >> 1;
+                r[0] = (r[0]>>1ULL) | (r[1]<<63ULL);
+                r[1] = (r[1]>>1ULL) | (r[2]<<63ULL);
+                r[2] = (r[2]>>1ULL) | (r[3]<<63ULL);
+                r[3] = (r[3]>>1ULL) | (r[4]<<63ULL);
+                r[4] = ((int64_t)r[4]) >> 1;
+            }
+            delta++;
+        } else if (delta > 0) {
+            // ── swap ──
+            // Save new values in locals, then commit
+            uint64_t nf[5], ng[5], nu[5], nv[5], nq[5], nr[5];
+
+            // f' = g, g' = (g-f)/2
+            nf[0]=g[0]; nf[1]=g[1]; nf[2]=g[2]; nf[3]=g[3]; nf[4]=g[4];
+            USUBO(ng[0], g[0], f[0]); USUBC(ng[1], g[1], f[1]);
+            USUBC(ng[2], g[2], f[2]); USUBC(ng[3], g[3], f[3]);
+            USUBC(ng[4], g[4], f[4]);
+            ng[0] = (ng[0]>>1ULL) | (ng[1]<<63ULL);
+            ng[1] = (ng[1]>>1ULL) | (ng[2]<<63ULL);
+            ng[2] = (ng[2]>>1ULL) | (ng[3]<<63ULL);
+            ng[3] = (ng[3]>>1ULL) | (ng[4]<<63ULL);
+            ng[4] = ((int64_t)ng[4]) >> 1;
+
+            // u' = q, v' = r
+            nu[0]=qv[0]; nu[1]=qv[1]; nu[2]=qv[2]; nu[3]=qv[3]; nu[4]=qv[4];
+            nv[0]=r[0]; nv[1]=r[1]; nv[2]=r[2]; nv[3]=r[3]; nv[4]=r[4];
+
+            // q' = (q-u)/2 (adjusted if odd)
+            USUBO(nq[0], qv[0], u[0]); USUBC(nq[1], qv[1], u[1]);
+            USUBC(nq[2], qv[2], u[2]); USUBC(nq[3], qv[3], u[3]);
+            USUBC(nq[4], qv[4], u[4]);
+
+            // r' = (r-v)/2 (adjusted if odd)
+            USUBO(nr[0], r[0], v[0]); USUBC(nr[1], r[1], v[1]);
+            USUBC(nr[2], r[2], v[2]); USUBC(nr[3], r[3], v[3]);
+            USUBC(nr[4], r[4], v[4]);
+
+            if (nq[0] & 1ULL) {
+                // nq = (nq + P) >> 1
+                carry=0; UADDO1(nq[0], p0); UADDC1(nq[1], p1);
+                UADDC1(nq[2], p2); UADDC1(nq[3], p3); UADD1(nq[4], 0ULL);
+                nq[0] = (nq[0]>>1ULL) | (nq[1]<<63ULL);
+                nq[1] = (nq[1]>>1ULL) | (nq[2]<<63ULL);
+                nq[2] = (nq[2]>>1ULL) | (nq[3]<<63ULL);
+                nq[3] = (nq[3]>>1ULL) | (nq[4]<<63ULL);
+                nq[4] = ((int64_t)nq[4]) >> 1;
+                // nr = (nr - a) >> 1
+                carry=0; USUBO1(nr[0], a_work[0]); USUBC1(nr[1], a_work[1]);
+                USUBC1(nr[2], a_work[2]); USUBC1(nr[3], a_work[3]); USUB1(nr[4], 0ULL);
+                nr[0] = (nr[0]>>1ULL) | (nr[1]<<63ULL);
+                nr[1] = (nr[1]>>1ULL) | (nr[2]<<63ULL);
+                nr[2] = (nr[2]>>1ULL) | (nr[3]<<63ULL);
+                nr[3] = (nr[3]>>1ULL) | (nr[4]<<63ULL);
+                nr[4] = ((int64_t)nr[4]) >> 1;
+            } else {
+                nq[0] = (nq[0]>>1ULL) | (nq[1]<<63ULL);
+                nq[1] = (nq[1]>>1ULL) | (nq[2]<<63ULL);
+                nq[2] = (nq[2]>>1ULL) | (nq[3]<<63ULL);
+                nq[3] = (nq[3]>>1ULL) | (nq[4]<<63ULL);
+                nq[4] = ((int64_t)nq[4]) >> 1;
+                nr[0] = (nr[0]>>1ULL) | (nr[1]<<63ULL);
+                nr[1] = (nr[1]>>1ULL) | (nr[2]<<63ULL);
+                nr[2] = (nr[2]>>1ULL) | (nr[3]<<63ULL);
+                nr[3] = (nr[3]>>1ULL) | (nr[4]<<63ULL);
+                nr[4] = ((int64_t)nr[4]) >> 1;
+            }
+
+            // Commit
+            f[0]=nf[0];f[1]=nf[1];f[2]=nf[2];f[3]=nf[3];f[4]=nf[4];
+            g[0]=ng[0];g[1]=ng[1];g[2]=ng[2];g[3]=ng[3];g[4]=ng[4];
+            u[0]=nu[0];u[1]=nu[1];u[2]=nu[2];u[3]=nu[3];u[4]=nu[4];
+            v[0]=nv[0];v[1]=nv[1];v[2]=nv[2];v[3]=nv[3];v[4]=nv[4];
+            qv[0]=nq[0];qv[1]=nq[1];qv[2]=nq[2];qv[3]=nq[3];qv[4]=nq[4];
+            r[0]=nr[0];r[1]=nr[1];r[2]=nr[2];r[3]=nr[3];r[4]=nr[4];
+            delta = 1 - delta;
+        } else {
+            // ── no-swap ──
+            uint64_t ng[5], nq[5], nr[5];
+
+            // g' = (g+f)/2
+            UADDO(ng[0], g[0], f[0]); UADDC(ng[1], g[1], f[1]);
+            UADDC(ng[2], g[2], f[2]); UADDC(ng[3], g[3], f[3]);
+            UADDC(ng[4], g[4], f[4]);
+            ng[0] = (ng[0]>>1ULL) | (ng[1]<<63ULL);
+            ng[1] = (ng[1]>>1ULL) | (ng[2]<<63ULL);
+            ng[2] = (ng[2]>>1ULL) | (ng[3]<<63ULL);
+            ng[3] = (ng[3]>>1ULL) | (ng[4]<<63ULL);
+            ng[4] = ((int64_t)ng[4]) >> 1;
+
+            // q' = (q+u)/2
+            UADDO(nq[0], qv[0], u[0]); UADDC(nq[1], qv[1], u[1]);
+            UADDC(nq[2], qv[2], u[2]); UADDC(nq[3], qv[3], u[3]);
+            UADDC(nq[4], qv[4], u[4]);
+
+            // r' = (r+v)/2
+            UADDO(nr[0], r[0], v[0]); UADDC(nr[1], r[1], v[1]);
+            UADDC(nr[2], r[2], v[2]); UADDC(nr[3], r[3], v[3]);
+            UADDC(nr[4], r[4], v[4]);
+
+            if (nq[0] & 1ULL) {
+                carry=0; UADDO1(nq[0], p0); UADDC1(nq[1], p1);
+                UADDC1(nq[2], p2); UADDC1(nq[3], p3); UADD1(nq[4], 0ULL);
+                nq[0] = (nq[0]>>1ULL) | (nq[1]<<63ULL);
+                nq[1] = (nq[1]>>1ULL) | (nq[2]<<63ULL);
+                nq[2] = (nq[2]>>1ULL) | (nq[3]<<63ULL);
+                nq[3] = (nq[3]>>1ULL) | (nq[4]<<63ULL);
+                nq[4] = ((int64_t)nq[4]) >> 1;
+                carry=0; USUBO1(nr[0], a_work[0]); USUBC1(nr[1], a_work[1]);
+                USUBC1(nr[2], a_work[2]); USUBC1(nr[3], a_work[3]); USUB1(nr[4], 0ULL);
+                nr[0] = (nr[0]>>1ULL) | (nr[1]<<63ULL);
+                nr[1] = (nr[1]>>1ULL) | (nr[2]<<63ULL);
+                nr[2] = (nr[2]>>1ULL) | (nr[3]<<63ULL);
+                nr[3] = (nr[3]>>1ULL) | (nr[4]<<63ULL);
+                nr[4] = ((int64_t)nr[4]) >> 1;
+            } else {
+                nq[0] = (nq[0]>>1ULL) | (nq[1]<<63ULL);
+                nq[1] = (nq[1]>>1ULL) | (nq[2]<<63ULL);
+                nq[2] = (nq[2]>>1ULL) | (nq[3]<<63ULL);
+                nq[3] = (nq[3]>>1ULL) | (nq[4]<<63ULL);
+                nq[4] = ((int64_t)nq[4]) >> 1;
+                nr[0] = (nr[0]>>1ULL) | (nr[1]<<63ULL);
+                nr[1] = (nr[1]>>1ULL) | (nr[2]<<63ULL);
+                nr[2] = (nr[2]>>1ULL) | (nr[3]<<63ULL);
+                nr[3] = (nr[3]>>1ULL) | (nr[4]<<63ULL);
+                nr[4] = ((int64_t)nr[4]) >> 1;
+            }
+
+            g[0]=ng[0];g[1]=ng[1];g[2]=ng[2];g[3]=ng[3];g[4]=ng[4];
+            qv[0]=nq[0];qv[1]=nq[1];qv[2]=nq[2];qv[3]=nq[3];qv[4]=nq[4];
+            r[0]=nr[0];r[1]=nr[1];r[2]=nr[2];r[3]=nr[3];r[4]=nr[4];
+            delta++;
+        }
+    }
+
+    // ── Extract inverse ──
+    // If f = 1: inverse = u (mod P)
+    // If f = -1: inverse = -u (mod P)
+    // If g = 1: inverse = q (mod P)
+    // If g = -1: inverse = -q (mod P)
+
+    uint64_t inv[5];
+    uint64_t f_is_one = (f[0]==1ULL && (f[1]|f[2]|f[3]|f[4])==0ULL) ? 1ULL : 0ULL;
+    uint64_t f_is_mone = ((f[0] & f[1] & f[2] & f[3] & f[4]) == 0xFFFFFFFFFFFFFFFFULL) ? 1ULL : 0ULL;
+    uint64_t g_is_one = (g[0]==1ULL && (g[1]|g[2]|g[3]|g[4])==0ULL) ? 1ULL : 0ULL;
+    uint64_t g_is_mone = ((g[0] & g[1] & g[2] & g[3] & g[4]) == 0xFFFFFFFFFFFFFFFFULL) ? 1ULL : 0ULL;
+
+    if (f_is_one) {
+        inv[0]=u[0];inv[1]=u[1];inv[2]=u[2];inv[3]=u[3];inv[4]=u[4];
+    } else if (f_is_mone) {
+        uint64_t carry;
+        USUBO(inv[0],0ULL,u[0]);USUBC(inv[1],0ULL,u[1]);
+        USUBC(inv[2],0ULL,u[2]);USUBC(inv[3],0ULL,u[3]);USUBC(inv[4],0ULL,u[4]);
+    } else if (g_is_one) {
+        inv[0]=qv[0];inv[1]=qv[1];inv[2]=qv[2];inv[3]=qv[3];inv[4]=qv[4];
+    } else {
+        uint64_t carry;
+        USUBO(inv[0],0ULL,qv[0]);USUBC(inv[1],0ULL,qv[1]);
+        USUBC(inv[2],0ULL,qv[2]);USUBC(inv[3],0ULL,qv[3]);USUBC(inv[4],0ULL,qv[4]);
+    }
+
+    // Reduce 5-limb inverse to 4-limb (mod P)
+    // ARMADILLO: inv mod P = inv[0..3] + signed(inv[4]) * C256
+    uint64_t carry;
+    int64_t sinv4 = (int64_t)inv[4];
+    if (sinv4 >= 0) {
+        // Positive: ADD sinv4 * C256 (unsigned)
+        __uint128_t p = (__uint128_t)sinv4 * 0x1000003D1ULL;
+        uint64_t plo = (uint64_t)p, phi = (uint64_t)(p>>64);
+        UADDO(R[0], inv[0], plo); UADDC(R[1], inv[1], phi);
+        UADDC(R[2], inv[2], 0ULL); UADDC(R[3], inv[3], 0ULL);
+        for (int k=0; k<3 && carry; k++) {
+            p = (__uint128_t)carry * 0x1000003D1ULL;
+            plo = (uint64_t)p; phi = (uint64_t)(p>>64);
+            carry=0;
+            UADDO1(R[0], plo); UADDC1(R[1], phi);
+            UADDC1(R[2], 0ULL); UADD1(R[3], 0ULL);
+        }
+    } else {
+        // Negative: SUBTRACT |sinv4| * C256
+        uint64_t absv = (uint64_t)(-sinv4);
+        __uint128_t p = (__uint128_t)absv * 0x1000003D1ULL;
+        uint64_t plo = (uint64_t)p, phi = (uint64_t)(p>>64);
+        USUBO(R[0], inv[0], plo); USUBC(R[1], inv[1], phi);
+        USUBC(R[2], inv[2], 0ULL); USUBC(R[3], inv[3], 0ULL);
+    }
+    // Subtract P if >= P
+    uint64_t t[4];
+    USUBO(t[0], R[0], p0); USUBC(t[1], R[1], p1);
+    USUBC(t[2], R[2], p2); USUBC(t[3], R[3], p3);
+    uint64_t borrow = carry;
+    if (borrow==0ULL) { R[0]=t[0];R[1]=t[1];R[2]=t[2];R[3]=t[3]; }
+
+    R[4] = 0ULL;
+}
+
 // ── Field inversion ─────────────────────────────────────────────────────
 __device__ void fieldInv(const uint64_t in[4], uint64_t out[4]) {
     uint64_t t[5]={in[0],in[1],in[2],in[3],0};
