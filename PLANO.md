@@ -1,5 +1,10 @@
 # BRBtcHuntAMD — Plano de Otimização
 
+> **⚠️ Task tracking migrado para Taskwarrior (tw-flow).**
+> Este `.md` é agora um documento de referência estratégica e lições aprendidas.
+> Status atual, outcomes e prioridades vivem no plan `brbtchunt-opt`.
+> Comando: `tw-flow status brbtchunt-opt`
+
 ## Missão
 Recuperar a performance do CUDACyclone original (~2 Gkeys/s em NVIDIA) no AMD ROCm/HIP.  
 Atualmente: ~500 Mkeys/s com Fermat inversion.  
