@@ -743,10 +743,15 @@ __device__ __noinline__ void _ModInv(uint64_t* R) {
 __device__ __noinline__ void _ModInvBY(uint64_t* R) {
     if ((R[0]|R[1]|R[2]|R[3])==0ULL) return;
 
-    // Input must be odd. If even, return 0 (caller must preprocess).
+    // Even inputs: inv(a) = P - inv(P-a). P-a is odd, so BY applies.
+    bool was_even = false;
     if ((R[0] & 1ULL) == 0ULL) {
-        R[0]=R[1]=R[2]=R[3]=R[4]=0ULL;
-        return;
+        was_even = true;
+        uint64_t carry = 0;
+        uint64_t n0, n1, n2, n3;
+        USUBO(n0, 0xFFFFFFFEFFFFFC2FULL, R[0]); USUBC(n1, 0xFFFFFFFFFFFFFFFFULL, R[1]);
+        USUBC(n2, 0xFFFFFFFFFFFFFFFFULL, R[2]); USUBC(n3, 0xFFFFFFFFFFFFFFFFULL, R[3]);
+        R[0]=n0; R[1]=n1; R[2]=n2; R[3]=n3; R[4]=0;
     }
 
     uint64_t a_work[4] = {R[0],R[1],R[2],R[3]};
@@ -1001,10 +1006,18 @@ __device__ __noinline__ void _ModInvBY(uint64_t* R) {
     uint64_t borrow = carry;
     if (borrow==0ULL) { R[0]=t[0];R[1]=t[1];R[2]=t[2];R[3]=t[3]; }
 
+    // If input was even, result so far is inv(P-a). Final: inv(a) = P - inv(P-a).
+    if (was_even) {
+        uint64_t carry = 0;
+        uint64_t n0, n1, n2, n3;
+        USUBO(n0, 0xFFFFFFFEFFFFFC2FULL, R[0]); USUBC(n1, 0xFFFFFFFFFFFFFFFFULL, R[1]);
+        USUBC(n2, 0xFFFFFFFFFFFFFFFFULL, R[2]); USUBC(n3, 0xFFFFFFFFFFFFFFFFULL, R[3]);
+        R[0]=n0; R[1]=n1; R[2]=n2; R[3]=n3;
+    }
+
     R[4] = 0ULL;
 }
 
-// ── Field inversion ─────────────────────────────────────────────────────
 // ── Field inversion (Bernstein-Yang Algorithm 1) ──────────────────────
 __device__ void fieldInv(const uint64_t in[4], uint64_t out[4]) {
     uint64_t t[5]={in[0],in[1],in[2],in[3],0};
