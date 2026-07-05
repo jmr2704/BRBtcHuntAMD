@@ -28,6 +28,17 @@ todos os resultados de inversão modular.
 - ❌ Programa não encontrava chaves
 - ✅ APÓS FIX: ~500-580 Mkeys/s, chaves encontradas corretamente
 
+### Correções Adicionais (pós-fix)
+
+**MatrixVecMul — ordering bug:** `u` era sobrescrito antes de computar `v`,
+que dependia do `u` original. Agora escreve `v` primeiro (usa `u` intacto),
+depois `u`.
+
+**AddCh — reescrita com Clang builtins:** Substituído o carry manual
+(`UADDO1`/`UADDC1` com carry flag implícita) por `__builtin_addcll`,
+que explicita a cadeia de carry com variável `_c`. Mais robusto e
+portável entre Clang/GCC.
+
 ---
 
 ## Fase 1: GCD Inversion (🔜 PRÓXIMA)
@@ -121,6 +132,14 @@ Baixa — ganho marginal depois do GCD.
 
 2. **AddCh era o bug central**: Carry chain duplicado corrompia TODAS as
    operações de inversão modular. Nada funcionava até consertar isso.
+
+5. **MatrixVecMul ordering é crítico**: Quando `u` e `v` são entrada E saída,
+   a ordem das operações importa. Escrever `u` antes de ler pra `v` corrompe
+   o resultado.
+
+6. **__builtin_addcll > carry manual**: Os builtins do Clang (`__builtin_addcll`)
+   são mais explícitos e portáveis que depender da carry flag implícita via
+   `UADDO`/`UADDC` macros. Eliminam ambiguidade de otimização do compilador.
 
 3. **Binary GCD caseiro é traiçoeiro**: Signed arithmetic em 256-bit sem
    espaço pra carry extra (257o bit) leva a bugs sutis.

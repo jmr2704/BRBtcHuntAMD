@@ -420,26 +420,23 @@ __device__ void MatrixVecMul(uint64_t u[5],uint64_t v[5],
                               int64_t _21,int64_t _22) {
   uint64_t t1[NBBLOCK],t2[NBBLOCK],t3[NBBLOCK],t4[NBBLOCK],carry;
   IMult(t1,u,_11); IMult(t2,v,_12); IMult(t3,u,_21); IMult(t4,v,_22);
-  carry=0; UADDO(u[0],t1[0],t2[0]); UADDC(u[1],t1[1],t2[1]);
-  UADDC(u[2],t1[2],t2[2]); UADDC(u[3],t1[3],t2[3]); UADD(u[4],t1[4],t2[4]);
+  // NOTE: write v FIRST (uses original u), then u (overwrites u)
   carry=0; UADDO(v[0],t3[0],t4[0]); UADDC(v[1],t3[1],t4[1]);
   UADDC(v[2],t3[2],t4[2]); UADDC(v[3],t3[3],t4[3]); UADD(v[4],t3[4],t4[4]);
+  carry=0; UADDO(u[0],t1[0],t2[0]); UADDC(u[1],t1[1],t2[1]);
+  UADDC(u[2],t1[2],t2[2]); UADDC(u[3],t1[3],t2[3]); UADD(u[4],t1[4],t2[4]);
 }
 
 __device__ uint64_t AddCh(uint64_t r[5],uint64_t a[5],uint64_t carry_in) {
-  uint64_t carry=carry_in;
-  uint64_t carry_out;
-  UADDO1(r[0],a[0]);
-  carry_out = carry;
-  UADDC1(r[1],a[1]);
-  carry_out = carry;
-  UADDC1(r[2],a[2]);
-  carry_out = carry;
-  UADDC1(r[3],a[3]);
-  carry_out = carry;
-  UADDC1(r[4],a[4]);
-  carry_out = carry;
-  return carry_in + carry_out;
+  // r += a + carry_in. Returns final carry out (0 or 1).
+  unsigned long long _c;
+  r[0] = __builtin_addcll(r[0], a[0], carry_in, &_c);
+  uint64_t carry = (uint64_t)_c;
+  r[1] = __builtin_addcll(r[1], a[1], carry, &_c); carry = (uint64_t)_c;
+  r[2] = __builtin_addcll(r[2], a[2], carry, &_c); carry = (uint64_t)_c;
+  r[3] = __builtin_addcll(r[3], a[3], carry, &_c); carry = (uint64_t)_c;
+  r[4] = __builtin_addcll(r[4], a[4], carry, &_c); carry = (uint64_t)_c;
+  return carry;
 }
 
 
@@ -561,7 +558,7 @@ __device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
 // Fermat inversion: compute a^(p-2) mod p using square-and-multiply
 __device__ __noinline__ void _ModInv(uint64_t* R) {
     // Fermat inversion: compute a^(p-2) mod p using square-and-multiply
-    // (GCD version exists below but is disabled due to normalization bugs)
+    // (GCD version exists in file but is commented out — see git history)
     if (R[0]==0 && R[1]==0 && R[2]==0 && R[3]==0) return;
     uint64_t res[NBBLOCK] = {1,0,0,0,0};
     uint64_t base[NBBLOCK] = {R[0],R[1],R[2],R[3],0};
