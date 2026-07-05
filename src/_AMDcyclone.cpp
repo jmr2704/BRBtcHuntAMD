@@ -166,7 +166,7 @@ __global__ void kernel_point_add_and_check_oneinv(
         for (int j=0;j<4;++j) inverse[j] = d0[j];
         _ModMult(inverse, subp[0]);
         inverse[4] = 0ull;
-        _ModInv(inverse);
+        _ModInvBY(inverse);
 
         uint64_t sy_neg[4], sx_neg[4];
         ModNeg256(sy_neg, y1);

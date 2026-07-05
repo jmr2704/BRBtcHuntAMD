@@ -1005,9 +1005,10 @@ __device__ __noinline__ void _ModInvBY(uint64_t* R) {
 }
 
 // ── Field inversion ─────────────────────────────────────────────────────
+// ── Field inversion (Bernstein-Yang Algorithm 1) ──────────────────────
 __device__ void fieldInv(const uint64_t in[4], uint64_t out[4]) {
     uint64_t t[5]={in[0],in[1],in[2],in[3],0};
-    _ModInv(t);
+    _ModInvBY(t);
     out[0]=t[0];out[1]=t[1];out[2]=t[2];out[3]=t[3];
 }
 
