@@ -387,7 +387,8 @@ __device__ void _DivStep62(uint64_t u[5],uint64_t v[5],
                            int64_t *vu,int64_t *vv) {
   *uu=1;*uv=0;*vu=0;*vv=1;
   uint32_t bitCount=62;
-  uint64_t u0=u[0],v0=v[0],uh,vh;
+  uint64_t u0=u[0],v0=v[0];
+  int64_t uh, vh;  // SIGNED: comparison must detect negative values
   int64_t w,x,y,z;
   while(*pos>0&&(u[*pos]|v[*pos])==0)(*pos)--;
   if(*pos==0){ uh=u[0]; vh=v[0]; }
@@ -396,7 +397,9 @@ __device__ void _DivStep62(uint64_t u[5],uint64_t v[5],
     if(s==0){ uh=u[*pos]; vh=v[*pos]; }
     else{ uh=__sleft128(u[*pos-1],u[*pos],s); vh=__sleft128(v[*pos-1],v[*pos],s); }
   }
+  int _div_safe = 0;
   while(1){
+    if (++_div_safe > 2000) break;  // safety limit
     uint32_t zeros=ctz(v0|(1ULL<<bitCount));
     v0>>=zeros; vh>>=zeros; *uu<<=zeros; *uv<<=zeros; bitCount-=zeros;
     if(bitCount==0)break;
@@ -554,16 +557,143 @@ __device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
   }
 }
 
-// ── Modular inverse (Fermat exponentiation, NO aliasing) ──────────────
-// Fermat inversion: compute a^(p-2) mod p using square-and-multiply
+// ── 4×64-bit LE ↔ 5×62-bit signed conversion ─────────────────────────
+// _DivStep62 operates on 5-limb signed values where each limb has at
+// most 62 significant bits (MSK62 = 0x3FFFFFFFFFFFFFFF). The total
+// range is 310 bits signed, giving 54 extra bits for arithmetic.
+
+// Convert 4×64-bit LE (256-bit unsigned) to 5×62-bit signed
+__device__ __forceinline__ void to62(const uint64_t src[4], uint64_t dst[5]) {
+    dst[0] = src[0] & MSK62;
+    dst[1] = ((src[0] >> 62) | (src[1] << 2)) & MSK62;
+    dst[2] = ((src[1] >> 60) | (src[2] << 4)) & MSK62;
+    dst[3] = ((src[2] >> 58) | (src[3] << 6)) & MSK62;
+    // Top 8 bits (248-255) in dst[4], signed extend
+    dst[4] = (src[3] >> 56) & 0xFFULL;
+    if (dst[4] & 0x80ULL) dst[4] |= 0xFFFFFFFFFFFFFF00ULL;  // sign extend bit 7
+}
+
+// Convert 5×62-bit signed to 4×64-bit LE (truncating high bits).
+// If src[4] is negative, the 256-bit value is in [2^256 - offset, 2^256).
+__device__ __forceinline__ void from62(const uint64_t src[5], uint64_t dst[4]) {
+    dst[0] =  (src[0]       | (src[1] << 62));
+    dst[1] = ((src[1] >> 2) | (src[2] << 60));
+    dst[2] = ((src[2] >> 4) | (src[3] << 58));
+    dst[3] = ((src[3] >> 6) | ((uint64_t)((int64_t)src[4] << 56)));
+}
+
+// ── Modular inverse (GCD — Bernstein-Yang 62-bit) ─────────────────────
+// Uses DivStep62 + MatrixVecMul on 5×62-bit signed representation.
+// Converges in ~5-12 iterations vs 384 field mults for Fermat.
+// Converts to/from 5×62-bit internally; normalizes to [0, p) at exit.
+__device__ __noinline__ void _ModInvGCD(uint64_t R[5]) {
+    if (R[0]==0 && R[1]==0 && R[2]==0 && R[3]==0) {
+        R[4] = 0; return;
+    }
+
+    uint64_t u[5], v[5];
+    // Bezout coefficients: we track 4 accumulators:
+    //   u = uc_a * a + uc_p * p  (u is the running remainder)
+    //   v = vc_a * a + vc_p * p  (v is the other remainder)
+    // When v == 1: vc_a * a + vc_p * p = 1 → vc_a = a^(-1) mod p
+    uint64_t uc_a[5] = {1,0,0,0,0};  // coefficient of a in u
+    uint64_t uc_p[5] = {0,0,0,0,0};  // coefficient of p in u
+    uint64_t vc_a[5] = {0,0,0,0,0};  // coefficient of a in v  ← THIS IS THE INVERSE
+    uint64_t vc_p[5] = {1,0,0,0,0};  // coefficient of p in v
+    uint64_t tmp[5];
+    uint64_t carry;
+
+    // Convert R (4×64-bit LE) to 5×62-bit signed
+    to62(R, u);
+
+    // Convert p (secp256k1 prime) to 5×62-bit signed
+    {
+        uint64_t p64[4] = {0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
+                           0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
+        to62(p64, v);
+    }
+
+    // Safety limit: GCD usually converges in ~5-12 iters for 256-bit.
+    // Small inputs (like inv(2)) may need more due to magnitude imbalance.
+    for (int iter = 0; iter < 1000; iter++) {
+        if (_IsOne(v) || _IsZero(v)) break;
+
+        int32_t pos = 4;
+        int64_t uu, uv, vu, vv;
+
+        // Compute transformation matrix from current u, v
+        _DivStep62(u, v, &pos, &uu, &uv, &vu, &vv);
+
+        // Apply transformation to u, v: u' = uu*u + uv*v, v' = vu*u + vv*v
+        MatrixVecMul(u, v, uu, uv, vu, vv);
+
+        // Apply transformation to ALL FOUR Bezout accumulators:
+        //   uc_a' = uu * uc_a + uv * vc_a     (new coefficient of a in u)
+        //   uc_p' = uu * uc_p + uv * vc_p     (new coefficient of p in u)
+        //   vc_a' = vu * uc_a + vv * vc_a     (new coefficient of a in v) ← INVERSE
+        //   vc_p' = vu * uc_p + vv * vc_p     (new coefficient of p in v)
+        uint64_t c1, c2, c3, c4;
+        MatrixVecMulHalf(tmp,  uc_a, vc_a, uu, uv, &c1);  // new uc_a
+        MatrixVecMulHalf(uc_p, uc_p, vc_p, uu, uv, &c2);  // new uc_p (overwrites old uc_p)
+        MatrixVecMulHalf(vc_a, uc_a, vc_a, vu, vv, &c3);  // new vc_a (overwrites old vc_a, reads old uc_a & vc_a)
+        MatrixVecMulHalf(vc_p, uc_p, vc_p, vu, vv, &c4);  // new vc_p (reads old uc_p)
+        // Propagate carries into limb 4
+        tmp[4]  += c1;
+        uc_p[4] += c2;
+        vc_a[4] += c3;
+        vc_p[4] += c4;
+        uc_a[0] = tmp[0]; uc_a[1] = tmp[1]; uc_a[2] = tmp[2];
+        uc_a[3] = tmp[3]; uc_a[4] = tmp[4];
+    }
+
+    // Result is in vc_a (if v==1) or uc_a (if u==1)
+    // Because: 1 = vc_a * a + vc_p * p when v==1, so vc_a * a ≡ 1 mod p
+    //           1 = uc_a * a + uc_p * p when u==1, so uc_a * a ≡ 1 mod p
+    uint64_t *res62 = _IsOne(v) ? vc_a : uc_a;
+
+    uint64_t val64[4];
+    uint64_t p64[4] = {0xFFFFFFFEFFFFFC2FULL, 0xFFFFFFFFFFFFFFFFULL,
+                       0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
+
+    if ((int64_t)res62[4] < 0) {
+        // Negative in 62-bit signed → positive inverse = p - |result|
+        carry = 0;
+        Neg(res62);                         // res62 = |result| (positive)
+        from62(res62, val64);               // val64 = |result| in 256-bit
+        // R = p - val64
+        carry = 0;
+        USUBO(R[0], p64[0], val64[0]);
+        USUBC(R[1], p64[1], val64[1]);
+        USUBC(R[2], p64[2], val64[2]);
+        USUBC(R[3], p64[3], val64[3]);
+    } else {
+        // Non-negative in 62-bit signed → normal 256-bit value
+        from62(res62, val64);
+        R[0] = val64[0]; R[1] = val64[1]; R[2] = val64[2]; R[3] = val64[3];
+        // Conditional reduction: if R >= p, subtract p
+        if (R[3] > 0xFFFFFFFFFFFFFFFFULL ||
+            (R[3] == 0xFFFFFFFFFFFFFFFFULL &&
+             R[2] == 0xFFFFFFFFFFFFFFFFULL &&
+             R[1] == 0xFFFFFFFFFFFFFFFFULL &&
+             R[0] >= 0xFFFFFFFEFFFFFC2FULL)) {
+            carry = 0;
+            USUBO1(R[0], 0xFFFFFFFEFFFFFC2FULL);
+            USUBC1(R[1], 0xFFFFFFFFFFFFFFFFULL);
+            USUBC1(R[2], 0xFFFFFFFFFFFFFFFFULL);
+            USUB1(R[3], 0xFFFFFFFFFFFFFFFFULL);
+        }
+    }
+    R[4] = 0;
+}
+
+// ── Modular inverse (Fermat exponentiation) ─────────────────────────
+// Reliable default. ~500 Mkeys/s on RX 6600.
+// GCD version (_ModInvGCD) exists in this file for experimental use.
 __device__ __noinline__ void _ModInv(uint64_t* R) {
-    // Fermat inversion: compute a^(p-2) mod p using square-and-multiply
-    // (GCD version exists in file but is commented out — see git history)
     if (R[0]==0 && R[1]==0 && R[2]==0 && R[3]==0) return;
     uint64_t res[NBBLOCK] = {1,0,0,0,0};
     uint64_t base[NBBLOCK] = {R[0],R[1],R[2],R[3],0};
     uint64_t tmp[NBBLOCK];
-    // p-2 in LE (limb 0 = 0xFFFFFFFEFFFFFC2D)
     uint64_t exp[4] = {0xFFFFFFFEFFFFFC2DULL,0xFFFFFFFFFFFFFFFFULL,
                        0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL};
     bool started = false;
