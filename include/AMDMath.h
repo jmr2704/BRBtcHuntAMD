@@ -740,7 +740,13 @@ __device__ __noinline__ void _ModInv(uint64_t* R) {
 // When a coefficient is odd and must be divided by 2, we add P to
 // the 'a'-coefficient or subtract a from the 'P'-coefficient,
 // preserving the invariant since P*a - a*P = 0.
-__device__ __noinline__ void _ModInvBY(uint64_t* R) {
+// ── P constant in device memory ──
+static __device__ __constant__ const uint64_t BY_P[4] = {
+    0xFFFFFFFEFFFFFC2FULL,0xFFFFFFFFFFFFFFFFULL,
+    0xFFFFFFFFFFFFFFFFULL,0xFFFFFFFFFFFFFFFFULL
+};
+
+__device__ void _ModInvBY(uint64_t* R) {
     if ((R[0]|R[1]|R[2]|R[3])==0ULL) return;
 
     // Even inputs: inv(a) = P - inv(P-a). P-a is odd, so BY applies.
@@ -767,11 +773,7 @@ __device__ __noinline__ void _ModInvBY(uint64_t* R) {
 
     int32_t delta = 1;
 
-    // ── Shorthands for constants ──
-    const uint64_t p0 = 0xFFFFFFFEFFFFFC2FULL;
-    const uint64_t p1 = 0xFFFFFFFFFFFFFFFFULL;
-    const uint64_t p2 = 0xFFFFFFFFFFFFFFFFULL;
-    const uint64_t p3 = 0xFFFFFFFFFFFFFFFFULL;
+    // Using BY_P[] constant memory
 
     for (int step = 0; step < 2000; step++) {
         // Check termination: g==0 or f==±1
@@ -793,8 +795,8 @@ __device__ __noinline__ void _ModInvBY(uint64_t* R) {
 
             if (qv[0] & 1ULL) {
                 // q = (q + P) >> 1
-                UADDO1(qv[0], p0); UADDC1(qv[1], p1);
-                UADDC1(qv[2], p2); UADDC1(qv[3], p3); UADD1(qv[4], 0ULL);
+                UADDO1(qv[0], BY_P[0]); UADDC1(qv[1], BY_P[1]);
+                UADDC1(qv[2], BY_P[2]); UADDC1(qv[3], BY_P[3]); UADD1(qv[4], 0ULL);
                 qv[0] = (qv[0]>>1ULL) | (qv[1]<<63ULL);
                 qv[1] = (qv[1]>>1ULL) | (qv[2]<<63ULL);
                 qv[2] = (qv[2]>>1ULL) | (qv[3]<<63ULL);
@@ -822,128 +824,87 @@ __device__ __noinline__ void _ModInvBY(uint64_t* R) {
             }
             delta++;
         } else if (delta > 0) {
-            // ── swap ──
-            // Save new values in locals, then commit
-            uint64_t nf[5], ng[5], nu[5], nv[5], nq[5], nr[5];
-
-            // f' = g, g' = (g-f)/2
-            nf[0]=g[0]; nf[1]=g[1]; nf[2]=g[2]; nf[3]=g[3]; nf[4]=g[4];
-            USUBO(ng[0], g[0], f[0]); USUBC(ng[1], g[1], f[1]);
-            USUBC(ng[2], g[2], f[2]); USUBC(ng[3], g[3], f[3]);
-            USUBC(ng[4], g[4], f[4]);
-            ng[0] = (ng[0]>>1ULL) | (ng[1]<<63ULL);
-            ng[1] = (ng[1]>>1ULL) | (ng[2]<<63ULL);
-            ng[2] = (ng[2]>>1ULL) | (ng[3]<<63ULL);
-            ng[3] = (ng[3]>>1ULL) | (ng[4]<<63ULL);
-            ng[4] = ((int64_t)ng[4]) >> 1;
-
-            // u' = q, v' = r
-            nu[0]=qv[0]; nu[1]=qv[1]; nu[2]=qv[2]; nu[3]=qv[3]; nu[4]=qv[4];
-            nv[0]=r[0]; nv[1]=r[1]; nv[2]=r[2]; nv[3]=r[3]; nv[4]=r[4];
-
-            // q' = (q-u)/2 (adjusted if odd)
-            USUBO(nq[0], qv[0], u[0]); USUBC(nq[1], qv[1], u[1]);
-            USUBC(nq[2], qv[2], u[2]); USUBC(nq[3], qv[3], u[3]);
-            USUBC(nq[4], qv[4], u[4]);
-
-            // r' = (r-v)/2 (adjusted if odd)
-            USUBO(nr[0], r[0], v[0]); USUBC(nr[1], r[1], v[1]);
-            USUBC(nr[2], r[2], v[2]); USUBC(nr[3], r[3], v[3]);
-            USUBC(nr[4], r[4], v[4]);
-
-            if (nq[0] & 1ULL) {
-                // nq = (nq + P) >> 1
-                carry=0; UADDO1(nq[0], p0); UADDC1(nq[1], p1);
-                UADDC1(nq[2], p2); UADDC1(nq[3], p3); UADD1(nq[4], 0ULL);
-                nq[0] = (nq[0]>>1ULL) | (nq[1]<<63ULL);
-                nq[1] = (nq[1]>>1ULL) | (nq[2]<<63ULL);
-                nq[2] = (nq[2]>>1ULL) | (nq[3]<<63ULL);
-                nq[3] = (nq[3]>>1ULL) | (nq[4]<<63ULL);
-                nq[4] = ((int64_t)nq[4]) >> 1;
-                // nr = (nr - a) >> 1
-                carry=0; USUBO1(nr[0], a_work[0]); USUBC1(nr[1], a_work[1]);
-                USUBC1(nr[2], a_work[2]); USUBC1(nr[3], a_work[3]); USUB1(nr[4], 0ULL);
-                nr[0] = (nr[0]>>1ULL) | (nr[1]<<63ULL);
-                nr[1] = (nr[1]>>1ULL) | (nr[2]<<63ULL);
-                nr[2] = (nr[2]>>1ULL) | (nr[3]<<63ULL);
-                nr[3] = (nr[3]>>1ULL) | (nr[4]<<63ULL);
-                nr[4] = ((int64_t)nr[4]) >> 1;
+            // ── swap (in-place, 3 temps instead of 6) ──
+            // Save old_f, old_u, old_v before overwriting
+            uint64_t tf[5], tu[5], tv[5];
+            tf[0]=f[0];tf[1]=f[1];tf[2]=f[2];tf[3]=f[3];tf[4]=f[4];
+            tu[0]=u[0];tu[1]=u[1];tu[2]=u[2];tu[3]=u[3];tu[4]=u[4];
+            tv[0]=v[0];tv[1]=v[1];tv[2]=v[2];tv[3]=v[3];tv[4]=v[4];
+            // new_f = old_g, new_u = old_q, new_v = old_r
+            f[0]=g[0];f[1]=g[1];f[2]=g[2];f[3]=g[3];f[4]=g[4];
+            u[0]=qv[0];u[1]=qv[1];u[2]=qv[2];u[3]=qv[3];u[4]=qv[4];
+            v[0]=r[0];v[1]=r[1];v[2]=r[2];v[3]=r[3];v[4]=r[4];
+            // new_g = (old_g - old_f) / 2  ← in-place on g
+            USUBO(g[0], g[0], tf[0]); USUBC(g[1], g[1], tf[1]);
+            USUBC(g[2], g[2], tf[2]); USUBC(g[3], g[3], tf[3]);
+            USUBC(g[4], g[4], tf[4]);
+            g[0]=(g[0]>>1ULL)|(g[1]<<63ULL);g[1]=(g[1]>>1ULL)|(g[2]<<63ULL);
+            g[2]=(g[2]>>1ULL)|(g[3]<<63ULL);g[3]=(g[3]>>1ULL)|(g[4]<<63ULL);
+            g[4]=((int64_t)g[4])>>1;
+            // new_q = (old_q - old_u) / 2  ← in-place on qv
+            USUBO(qv[0], qv[0], tu[0]); USUBC(qv[1], qv[1], tu[1]);
+            USUBC(qv[2], qv[2], tu[2]); USUBC(qv[3], qv[3], tu[3]);
+            USUBC(qv[4], qv[4], tu[4]);
+            // new_r = (old_r - old_v) / 2  ← in-place on r
+            USUBO(r[0], r[0], tv[0]); USUBC(r[1], r[1], tv[1]);
+            USUBC(r[2], r[2], tv[2]); USUBC(r[3], r[3], tv[3]);
+            USUBC(r[4], r[4], tv[4]);
+            if (qv[0] & 1ULL) {
+                carry=0; UADDO1(qv[0], BY_P[0]); UADDC1(qv[1], BY_P[1]);
+                UADDC1(qv[2], BY_P[2]); UADDC1(qv[3], BY_P[3]); UADD1(qv[4], 0ULL);
+                qv[0]=(qv[0]>>1ULL)|(qv[1]<<63ULL);qv[1]=(qv[1]>>1ULL)|(qv[2]<<63ULL);
+                qv[2]=(qv[2]>>1ULL)|(qv[3]<<63ULL);qv[3]=(qv[3]>>1ULL)|(qv[4]<<63ULL);
+                qv[4]=((int64_t)qv[4])>>1;
+                carry=0; USUBO1(r[0], a_work[0]); USUBC1(r[1], a_work[1]);
+                USUBC1(r[2], a_work[2]); USUBC1(r[3], a_work[3]); USUB1(r[4], 0ULL);
+                r[0]=(r[0]>>1ULL)|(r[1]<<63ULL);r[1]=(r[1]>>1ULL)|(r[2]<<63ULL);
+                r[2]=(r[2]>>1ULL)|(r[3]<<63ULL);r[3]=(r[3]>>1ULL)|(r[4]<<63ULL);
+                r[4]=((int64_t)r[4])>>1;
             } else {
-                nq[0] = (nq[0]>>1ULL) | (nq[1]<<63ULL);
-                nq[1] = (nq[1]>>1ULL) | (nq[2]<<63ULL);
-                nq[2] = (nq[2]>>1ULL) | (nq[3]<<63ULL);
-                nq[3] = (nq[3]>>1ULL) | (nq[4]<<63ULL);
-                nq[4] = ((int64_t)nq[4]) >> 1;
-                nr[0] = (nr[0]>>1ULL) | (nr[1]<<63ULL);
-                nr[1] = (nr[1]>>1ULL) | (nr[2]<<63ULL);
-                nr[2] = (nr[2]>>1ULL) | (nr[3]<<63ULL);
-                nr[3] = (nr[3]>>1ULL) | (nr[4]<<63ULL);
-                nr[4] = ((int64_t)nr[4]) >> 1;
+                qv[0]=(qv[0]>>1ULL)|(qv[1]<<63ULL);qv[1]=(qv[1]>>1ULL)|(qv[2]<<63ULL);
+                qv[2]=(qv[2]>>1ULL)|(qv[3]<<63ULL);qv[3]=(qv[3]>>1ULL)|(qv[4]<<63ULL);
+                qv[4]=((int64_t)qv[4])>>1;
+                r[0]=(r[0]>>1ULL)|(r[1]<<63ULL);r[1]=(r[1]>>1ULL)|(r[2]<<63ULL);
+                r[2]=(r[2]>>1ULL)|(r[3]<<63ULL);r[3]=(r[3]>>1ULL)|(r[4]<<63ULL);
+                r[4]=((int64_t)r[4])>>1;
             }
-
-            // Commit
-            f[0]=nf[0];f[1]=nf[1];f[2]=nf[2];f[3]=nf[3];f[4]=nf[4];
-            g[0]=ng[0];g[1]=ng[1];g[2]=ng[2];g[3]=ng[3];g[4]=ng[4];
-            u[0]=nu[0];u[1]=nu[1];u[2]=nu[2];u[3]=nu[3];u[4]=nu[4];
-            v[0]=nv[0];v[1]=nv[1];v[2]=nv[2];v[3]=nv[3];v[4]=nv[4];
-            qv[0]=nq[0];qv[1]=nq[1];qv[2]=nq[2];qv[3]=nq[3];qv[4]=nq[4];
-            r[0]=nr[0];r[1]=nr[1];r[2]=nr[2];r[3]=nr[3];r[4]=nr[4];
             delta = 1 - delta;
         } else {
-            // ── no-swap ──
-            uint64_t ng[5], nq[5], nr[5];
-
-            // g' = (g+f)/2
-            UADDO(ng[0], g[0], f[0]); UADDC(ng[1], g[1], f[1]);
-            UADDC(ng[2], g[2], f[2]); UADDC(ng[3], g[3], f[3]);
-            UADDC(ng[4], g[4], f[4]);
-            ng[0] = (ng[0]>>1ULL) | (ng[1]<<63ULL);
-            ng[1] = (ng[1]>>1ULL) | (ng[2]<<63ULL);
-            ng[2] = (ng[2]>>1ULL) | (ng[3]<<63ULL);
-            ng[3] = (ng[3]>>1ULL) | (ng[4]<<63ULL);
-            ng[4] = ((int64_t)ng[4]) >> 1;
-
-            // q' = (q+u)/2
-            UADDO(nq[0], qv[0], u[0]); UADDC(nq[1], qv[1], u[1]);
-            UADDC(nq[2], qv[2], u[2]); UADDC(nq[3], qv[3], u[3]);
-            UADDC(nq[4], qv[4], u[4]);
-
-            // r' = (r+v)/2
-            UADDO(nr[0], r[0], v[0]); UADDC(nr[1], r[1], v[1]);
-            UADDC(nr[2], r[2], v[2]); UADDC(nr[3], r[3], v[3]);
-            UADDC(nr[4], r[4], v[4]);
-
-            if (nq[0] & 1ULL) {
-                carry=0; UADDO1(nq[0], p0); UADDC1(nq[1], p1);
-                UADDC1(nq[2], p2); UADDC1(nq[3], p3); UADD1(nq[4], 0ULL);
-                nq[0] = (nq[0]>>1ULL) | (nq[1]<<63ULL);
-                nq[1] = (nq[1]>>1ULL) | (nq[2]<<63ULL);
-                nq[2] = (nq[2]>>1ULL) | (nq[3]<<63ULL);
-                nq[3] = (nq[3]>>1ULL) | (nq[4]<<63ULL);
-                nq[4] = ((int64_t)nq[4]) >> 1;
-                carry=0; USUBO1(nr[0], a_work[0]); USUBC1(nr[1], a_work[1]);
-                USUBC1(nr[2], a_work[2]); USUBC1(nr[3], a_work[3]); USUB1(nr[4], 0ULL);
-                nr[0] = (nr[0]>>1ULL) | (nr[1]<<63ULL);
-                nr[1] = (nr[1]>>1ULL) | (nr[2]<<63ULL);
-                nr[2] = (nr[2]>>1ULL) | (nr[3]<<63ULL);
-                nr[3] = (nr[3]>>1ULL) | (nr[4]<<63ULL);
-                nr[4] = ((int64_t)nr[4]) >> 1;
+            // ── no-swap (in-place, no temporaries) ──
+            // g = (g+f)/2
+            UADDO(g[0], g[0], f[0]); UADDC(g[1], g[1], f[1]);
+            UADDC(g[2], g[2], f[2]); UADDC(g[3], g[3], f[3]);
+            UADDC(g[4], g[4], f[4]);
+            g[0]=(g[0]>>1ULL)|(g[1]<<63ULL);g[1]=(g[1]>>1ULL)|(g[2]<<63ULL);
+            g[2]=(g[2]>>1ULL)|(g[3]<<63ULL);g[3]=(g[3]>>1ULL)|(g[4]<<63ULL);
+            g[4]=((int64_t)g[4])>>1;
+            // q = (q+u)/2  (in-place)
+            UADDO(qv[0], qv[0], u[0]); UADDC(qv[1], qv[1], u[1]);
+            UADDC(qv[2], qv[2], u[2]); UADDC(qv[3], qv[3], u[3]);
+            UADDC(qv[4], qv[4], u[4]);
+            // r = (r+v)/2  (in-place)
+            UADDO(r[0], r[0], v[0]); UADDC(r[1], r[1], v[1]);
+            UADDC(r[2], r[2], v[2]); UADDC(r[3], r[3], v[3]);
+            UADDC(r[4], r[4], v[4]);
+            if (qv[0] & 1ULL) {
+                carry=0; UADDO1(qv[0], BY_P[0]); UADDC1(qv[1], BY_P[1]);
+                UADDC1(qv[2], BY_P[2]); UADDC1(qv[3], BY_P[3]); UADD1(qv[4], 0ULL);
+                qv[0]=(qv[0]>>1ULL)|(qv[1]<<63ULL);qv[1]=(qv[1]>>1ULL)|(qv[2]<<63ULL);
+                qv[2]=(qv[2]>>1ULL)|(qv[3]<<63ULL);qv[3]=(qv[3]>>1ULL)|(qv[4]<<63ULL);
+                qv[4]=((int64_t)qv[4])>>1;
+                carry=0; USUBO1(r[0], a_work[0]); USUBC1(r[1], a_work[1]);
+                USUBC1(r[2], a_work[2]); USUBC1(r[3], a_work[3]); USUB1(r[4], 0ULL);
+                r[0]=(r[0]>>1ULL)|(r[1]<<63ULL);r[1]=(r[1]>>1ULL)|(r[2]<<63ULL);
+                r[2]=(r[2]>>1ULL)|(r[3]<<63ULL);r[3]=(r[3]>>1ULL)|(r[4]<<63ULL);
+                r[4]=((int64_t)r[4])>>1;
             } else {
-                nq[0] = (nq[0]>>1ULL) | (nq[1]<<63ULL);
-                nq[1] = (nq[1]>>1ULL) | (nq[2]<<63ULL);
-                nq[2] = (nq[2]>>1ULL) | (nq[3]<<63ULL);
-                nq[3] = (nq[3]>>1ULL) | (nq[4]<<63ULL);
-                nq[4] = ((int64_t)nq[4]) >> 1;
-                nr[0] = (nr[0]>>1ULL) | (nr[1]<<63ULL);
-                nr[1] = (nr[1]>>1ULL) | (nr[2]<<63ULL);
-                nr[2] = (nr[2]>>1ULL) | (nr[3]<<63ULL);
-                nr[3] = (nr[3]>>1ULL) | (nr[4]<<63ULL);
-                nr[4] = ((int64_t)nr[4]) >> 1;
+                qv[0]=(qv[0]>>1ULL)|(qv[1]<<63ULL);qv[1]=(qv[1]>>1ULL)|(qv[2]<<63ULL);
+                qv[2]=(qv[2]>>1ULL)|(qv[3]<<63ULL);qv[3]=(qv[3]>>1ULL)|(qv[4]<<63ULL);
+                qv[4]=((int64_t)qv[4])>>1;
+                r[0]=(r[0]>>1ULL)|(r[1]<<63ULL);r[1]=(r[1]>>1ULL)|(r[2]<<63ULL);
+                r[2]=(r[2]>>1ULL)|(r[3]<<63ULL);r[3]=(r[3]>>1ULL)|(r[4]<<63ULL);
+                r[4]=((int64_t)r[4])>>1;
             }
-
-            g[0]=ng[0];g[1]=ng[1];g[2]=ng[2];g[3]=ng[3];g[4]=ng[4];
-            qv[0]=nq[0];qv[1]=nq[1];qv[2]=nq[2];qv[3]=nq[3];qv[4]=nq[4];
-            r[0]=nr[0];r[1]=nr[1];r[2]=nr[2];r[3]=nr[3];r[4]=nr[4];
             delta++;
         }
     }
@@ -1001,8 +962,8 @@ __device__ __noinline__ void _ModInvBY(uint64_t* R) {
     }
     // Subtract P if >= P
     uint64_t t[4];
-    USUBO(t[0], R[0], p0); USUBC(t[1], R[1], p1);
-    USUBC(t[2], R[2], p2); USUBC(t[3], R[3], p3);
+    USUBO(t[0], R[0], BY_P[0]); USUBC(t[1], R[1], BY_P[1]);
+    USUBC(t[2], R[2], BY_P[2]); USUBC(t[3], R[3], BY_P[3]);
     uint64_t borrow = carry;
     if (borrow==0ULL) { R[0]=t[0];R[1]=t[1];R[2]=t[2];R[3]=t[3]; }
 
