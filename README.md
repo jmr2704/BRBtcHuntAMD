@@ -1,3 +1,5 @@
+<div id="top"></div>
+
 # ⚡ BRBtcHuntAMD — GPU Satoshi Puzzle Solver
 
 <div align="center">
@@ -21,7 +23,7 @@ Brute‑force P2PKH addresses at **~1 billion keys/second** on a single RX 660
 
 ### 🌐 Escolha o idioma — Choose language
 
-[🇧🇷 **Português**](#português) &nbsp;·&nbsp; [🇬🇧 **English**](#english)
+[🇧🇷 **Português**](#pt) &nbsp;·&nbsp; [🇬🇧 **English**](#en)
 
 </div>
 
@@ -38,11 +40,13 @@ Brute‑force P2PKH addresses at **~1 billion keys/second** on a single RX 660
 
 ---
 
+<div id="pt"></div>
+
 # 🇧🇷 Português
 
 <div align="center">
 
-[⬆ Voltar ao topo](#-brbcthuntamd--gpu-satoshi-puzzle-solver) &nbsp;·&nbsp; [🇬🇧 Ir para English](#english)
+[⬆ Voltar ao topo](#top) &nbsp;·&nbsp; [🇬🇧 Ir para English](#en)
 
 </div>
 
@@ -303,11 +307,13 @@ Medido em uma única **AMD Radeon RX 6600** (RDNA 2, 14 CUs, 8 GB VRAM).
 
 <br>
 
+<div id="en"></div>
+
 # 🇬🇧 English
 
 <div align="center">
 
-[⬆ Back to top](#-brbcthuntamd--gpu-satoshi-puzzle-solver) &nbsp;·&nbsp; [🇧🇷 Ir para Português](#português)
+[⬆ Back to top](#top) &nbsp;·&nbsp; [🇧🇷 Ir para Português](#pt)
 
 </div>
 
