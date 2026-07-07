@@ -28,16 +28,18 @@ __device__ __constant__ uint32_t K[64] = {
     0x748F82EE,0x78A5636F,0x84C87814,0x8CC70208,0x90BEFFFA,0xA4506CEB,0xBEF9A3F7,0xC67178F2
 };
 
-__device__ __constant__ uint32_t IV[8] = {
-    0x6a09e667ul,0xbb67ae85ul,0x3c6ef372ul,0xa54ff53aul,
-    0x510e527ful,0x9b05688cul,0x1f83d9ab ,0x5be0cd19ul
-};
 __device__ __forceinline__ void SHA256Initialize(uint32_t s[8])
 {
-#pragma unroll
-    for (int i = 0; i < 8; i++) s[i] = IV[i];
+    s[0] = 0x6a09e667ul;
+    s[1] = 0xbb67ae85ul;
+    s[2] = 0x3c6ef372ul;
+    s[3] = 0xa54ff53aul;
+    s[4] = 0x510e527ful;
+    s[5] = 0x9b05688cul;
+    s[6] = 0x1f83d9abul;
+    s[7] = 0x5be0cd19ul;
 }
-__device__ __forceinline__ void SHA256Transform(uint32_t state[8], uint32_t W_in[64])
+__device__ __forceinline__ void SHA256Transform(uint32_t state[8], const uint32_t W_in[16])
 {
     uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
     uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
@@ -431,7 +433,7 @@ __device__ __forceinline__ bool compare20(const uint8_t* h, const uint8_t* ref) 
 }
 
 __device__ __forceinline__ uint32_t bswap32(uint32_t x){
-    return ((x & 0x000000FFu) << 24) | ((x & 0x0000FF00u) << 8) | ((x & 0x00FF0000u) >> 8) | ((x & 0xFF000000u) >> 24);
+    return __builtin_bswap32(x);
 }
 __device__ __forceinline__ uint32_t pack_be4(uint8_t a,uint8_t b,uint8_t c,uint8_t d){
     return ((uint32_t)a<<24)|((uint32_t)b<<16)|((uint32_t)c<<8)|((uint32_t)d);
@@ -485,11 +487,60 @@ __device__ __forceinline__ void RIPEMD160_from_SHA256_state(const uint32_t sha_s
     }
 }
 
-__device__ __noinline__ void getHash160_33_from_limbs(uint8_t prefix02_03,
-                                                      const uint64_t x_be_limbs[4],
-                                                      uint8_t out20[20])
+__device__ __forceinline__ void RIPEMD160_from_SHA256_state_words(const uint32_t sha_state_be[8],
+                                                                  uint32_t h160[5])
+{
+    uint32_t W[16];
+#pragma unroll
+    for(int i=0;i<8;++i) W[i] = bswap32(sha_state_be[i]);
+    W[8]  = 0x00000080u;
+#pragma unroll
+    for(int i=9;i<14;++i) W[i]=0;
+    W[14] = 256u;
+    W[15] = 0u;
+
+    uint32_t s[5];
+    RIPEMD160Initialize(s);
+    RIPEMD160Transform(s, W);
+#pragma unroll
+    for (int i = 0; i < 5; ++i) h160[i] = s[i];
+}
+
+__device__ __forceinline__ uint32_t hash_load_u32_le(const uint8_t* p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+__device__ __forceinline__ void getHash160_33_from_limbs(uint8_t prefix02_03,
+                                                         const uint64_t x_be_limbs[4],
+                                                         uint8_t out20[20])
 {
     uint32_t sha_state[8];
     SHA256_33_from_limbs(prefix02_03, x_be_limbs, sha_state);
     RIPEMD160_from_SHA256_state(sha_state, out20);
+}
+
+__device__ __forceinline__ bool getHash160_33_from_limbs_matches(uint8_t prefix02_03,
+                                                                 const uint64_t x_be_limbs[4],
+                                                                 const uint8_t target_hash160[20],
+                                                                 uint32_t target_prefix_le,
+                                                                 uint32_t h160_out[5])
+{
+    uint32_t sha_state[8];
+    uint32_t h160[5];
+    SHA256_33_from_limbs(prefix02_03, x_be_limbs, sha_state);
+    RIPEMD160_from_SHA256_state_words(sha_state, h160);
+
+    if (h160_out) {
+        h160_out[0] = h160[0]; h160_out[1] = h160[1];
+        h160_out[2] = h160[2]; h160_out[3] = h160[3];
+        h160_out[4] = h160[4];
+    }
+
+    if (h160[0] != target_prefix_le) return false;
+    return h160[1] == hash_load_u32_le(target_hash160 + 4) &&
+           h160[2] == hash_load_u32_le(target_hash160 + 8) &&
+           h160[3] == hash_load_u32_le(target_hash160 + 12) &&
+           h160[4] == hash_load_u32_le(target_hash160 + 16);
 }

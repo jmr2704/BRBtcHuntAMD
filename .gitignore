@@ -1,5 +1,32 @@
-*.o
-AMDcyclone
-test_*
-*.out
+# Build outputs
 BRBtcHuntAMD
+bench_mont
+bench_one_op
+bench_sha256_ops
+cios_trace
+
+# Object / temp
+src/*.o
+src/*.bc.tmp
+src/*.hipi
+src/*.o-d
+build/
+
+# Temp HIP artifacts
+_AMDcyclone-hip-amdgcn-amd-amdhsa-gfx1032*
+_AMDcyclone-hip-amdgcn-amd-amdhsa-gfx90c*
+
+# Config / data
+lang.cfg
+vanity_results.txt
+*.log
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

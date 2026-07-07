@@ -17,11 +17,28 @@
 #include <vector>
 #include <array>
 #include <random>
+#include <fstream>
 
 #include "AMDMath.h"
 #include "sha256.h"
 #include "AMDHash.h"
 #include "AMDUtils.h"
+#include "Lang.h"
+
+LangId g_lang = LangId::EN;
+
+static void load_lang_config() {
+    std::ifstream f("lang.cfg");
+    if (!f.is_open()) return;
+    std::string s; f >> s;
+    if (s == "pt" || s == "PT") g_lang = LangId::PT;
+}
+
+static void save_lang_config() {
+    std::ofstream f("lang.cfg");
+    if (!f.is_open()) return;
+    f << (g_lang == LangId::PT ? "pt" : "en") << "\n";
+}
 #include "AMDStructures.h"
 
 static volatile sig_atomic_t g_sigint = 0;
@@ -41,16 +58,67 @@ __device__ __forceinline__ bool warp_found_ready(const int* __restrict__ d_found
 }
 
 #ifndef MAX_BATCH_SIZE
-#define MAX_BATCH_SIZE 256
+#define MAX_BATCH_SIZE 2048
 #endif
 #ifndef WARP_SIZE
 #define WARP_SIZE 32
 #endif
 
-__device__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
-__device__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
-__device__ uint64_t c_Jx[4];
-__device__ uint64_t c_Jy[4];
+__constant__ uint64_t c_Gx[(MAX_BATCH_SIZE/2) * 4];
+__constant__ uint64_t c_Gy[(MAX_BATCH_SIZE/2) * 4];
+__constant__ uint64_t c_Jx[4];
+__constant__ uint64_t c_Jy[4];
+
+// ── Vanity constants & buffer ───────────────────────────────────────────────
+// c_vanity_compare_bytes = number of full bytes (0-20)
+// c_vanity_match_nibble  = 0=no extra nibble, 1=compare high nibble of next byte
+// The check: first (c_vanity_compare_bytes) bytes of h160 must equal c_target_hash160,
+// and if c_vanity_match_nibble, the high nibble of the next byte must also match.
+struct VanityResult {
+    uint64_t privkey[4];
+    uint64_t pubkey_x[4];
+    uint32_t hash160[5];
+    uint8_t  prefix;  // 0x02 or 0x03
+};
+__constant__ uint32_t c_vanity_compare_bytes;
+__constant__ uint32_t c_vanity_match_nibble;
+__device__ VanityResult* d_vanity_results;
+__device__ uint32_t* d_vanity_count;
+
+// ── Vanity check helper ─────────────────────────────────────────────────────
+// Compares the first N bytes (+ optional high nibble) of h160 against c_target_hash160.
+// On match, writes privkey, pubkey, hash160, prefix to the global result buffer.
+__device__ __forceinline__ void vanity_check_and_save(
+    const uint32_t h160[5],
+    uint8_t prefix,
+    const uint64_t privkey[4],
+    const uint64_t pubkey_x[4],
+    uint32_t* vanity_count,
+    VanityResult* vanity_buf,
+    uint32_t max_results)
+{
+    // Compare bytes
+    const uint8_t* h = (const uint8_t*)h160;
+    for (uint32_t b = 0; b < c_vanity_compare_bytes; ++b) {
+        if (h[b] != c_target_hash160[b]) return;
+    }
+    // Compare optional extra high nibble
+    if (c_vanity_match_nibble) {
+        uint8_t hn = (h[c_vanity_compare_bytes] >> 4) & 0x0f;
+        uint8_t tn = (c_target_hash160[c_vanity_compare_bytes] >> 4) & 0x0f;
+        if (hn != tn) return;
+    }
+
+    // Match — write to buffer
+    uint32_t slot = atomicAdd(vanity_count, 1);
+    if (slot < max_results && vanity_buf) {
+        VanityResult& r = vanity_buf[slot];
+        for (int k = 0; k < 4; ++k) r.privkey[k] = privkey[k];
+        for (int k = 0; k < 4; ++k) r.pubkey_x[k] = pubkey_x[k];
+        for (int k = 0; k < 5; ++k) r.hash160[k] = h160[k];
+        r.prefix = prefix;
+    }
+}
 
 __launch_bounds__(256, 2)
 __global__ void kernel_point_add_and_check_oneinv(
@@ -66,7 +134,10 @@ __global__ void kernel_point_add_and_check_oneinv(
     int* __restrict__ d_found_flag,
     FoundResult* __restrict__ d_found_result,
     unsigned long long* __restrict__ hashes_accum,
-    unsigned int* __restrict__ d_any_left
+    unsigned int* __restrict__ d_any_left,
+    uint32_t* __restrict__ d_vanity_count,
+    VanityResult* __restrict__ d_vanity_buf,
+    uint32_t vanity_max_results
 )
 {
     const int B = (int)batch_size;
@@ -81,6 +152,7 @@ __global__ void kernel_point_add_and_check_oneinv(
     if (warp_found_ready(d_found_flag, full_mask, lane)) return;
 
     const uint32_t target_prefix = c_target_prefix;
+    const bool _vanity_active = (c_vanity_compare_bytes > 0 || c_vanity_match_nibble > 0);
 
     unsigned int local_hashes = 0;
     #define FLUSH_THRESHOLD 65536u
@@ -115,14 +187,17 @@ __global__ void kernel_point_add_and_check_oneinv(
         if (warp_found_ready(d_found_flag, full_mask, lane)) { WARP_FLUSH_HASHES(); return; }
 
         {
-            uint8_t h20[20];
             uint8_t prefix = (uint8_t)(y1[0] & 1ULL) ? 0x03 : 0x02;
-            getHash160_33_from_limbs(prefix, x1, h20);
+            uint32_t _h160_i[5];
+            bool matched = getHash160_33_from_limbs_matches(prefix, x1, c_target_hash160, target_prefix,
+                _vanity_active ? _h160_i : nullptr);
             ++local_hashes; MAYBE_WARP_FLUSH();
+            if (_vanity_active) {
+                vanity_check_and_save(_h160_i, prefix, S, x1, d_vanity_count, d_vanity_buf, vanity_max_results);
+            }
 
-            bool pref = hash160_prefix_equals(h20, target_prefix);
-            if (__any_sync(full_mask, pref)) {
-                if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
+            if (__any_sync(full_mask, matched)) {
+                if (matched) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         d_found_result->threadId = (int)gid;
                         d_found_result->iter     = 0;
@@ -166,7 +241,7 @@ __global__ void kernel_point_add_and_check_oneinv(
         for (int j=0;j<4;++j) inverse[j] = d0[j];
         _ModMult(inverse, subp[0]);
         inverse[4] = 0ull;
-        _ModInvBY(inverse);
+        _ModInv(inverse);
 
         uint64_t sy_neg[4], sx_neg[4];
         ModNeg256(sy_neg, y1);
@@ -191,16 +266,30 @@ __global__ void kernel_point_add_and_check_oneinv(
                 ModSub256(px3, px3, x1);
                 ModSub256(px3, px3, px_i);
 
-                ModSub256(s, x1, px3);
-                _ModMult(s, s, lam);
-                uint8_t odd; ModSub256isOdd(s, y1, &odd);
-
-                uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
+                // Deferred parity: try 0x02, then 0x03 if no local match
+                uint32_t _h160_a[5];
+                bool m02 = getHash160_33_from_limbs_matches(0x02, px3, c_target_hash160, target_prefix,
+                    _vanity_active ? _h160_a : nullptr);
                 ++local_hashes; MAYBE_WARP_FLUSH();
+                if (_vanity_active) {
+                    vanity_check_and_save(_h160_a, 0x02, S, px3, d_vanity_count, d_vanity_buf, vanity_max_results);
+                }
+                bool matched;
+                if (!m02) {
+                    uint32_t _h160_b[5];
+                    bool m03 = getHash160_33_from_limbs_matches(0x03, px3, c_target_hash160, target_prefix,
+                        _vanity_active ? _h160_b : nullptr);
+                    ++local_hashes; MAYBE_WARP_FLUSH();
+                    if (_vanity_active) {
+                        vanity_check_and_save(_h160_b, 0x03, S, px3, d_vanity_count, d_vanity_buf, vanity_max_results);
+                    }
+                    matched = m03;
+                } else {
+                    matched = true;
+                }
 
-                bool pref = hash160_prefix_equals(h20, target_prefix);
-                if (__any_sync(full_mask, pref)) {
-                    if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
+                if (__any_sync(full_mask, matched)) {
+                    if (matched) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                             uint64_t addv=(uint64_t)(i+1);
@@ -237,16 +326,30 @@ __global__ void kernel_point_add_and_check_oneinv(
                 ModSub256(px3, px3, x1);
                 ModSub256(px3, px3, px_i);
 
-                ModSub256(s, x1, px3);
-                _ModMult(s, s, lam);
-                uint8_t odd; ModSub256isOdd(s, y1, &odd);
-
-                uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
+                // Deferred parity: try 0x02, then 0x03
+                uint32_t _h160_a[5];
+                bool m02 = getHash160_33_from_limbs_matches(0x02, px3, c_target_hash160, target_prefix,
+                    _vanity_active ? _h160_a : nullptr);
                 ++local_hashes; MAYBE_WARP_FLUSH();
+                if (_vanity_active) {
+                    vanity_check_and_save(_h160_a, 0x02, S, px3, d_vanity_count, d_vanity_buf, vanity_max_results);
+                }
+                bool matched;
+                if (!m02) {
+                    uint32_t _h160_b[5];
+                    bool m03 = getHash160_33_from_limbs_matches(0x03, px3, c_target_hash160, target_prefix,
+                        _vanity_active ? _h160_b : nullptr);
+                    ++local_hashes; MAYBE_WARP_FLUSH();
+                    if (_vanity_active) {
+                        vanity_check_and_save(_h160_b, 0x03, S, px3, d_vanity_count, d_vanity_buf, vanity_max_results);
+                    }
+                    matched = m03;
+                } else {
+                    matched = true;
+                }
 
-                bool pref = hash160_prefix_equals(h20, target_prefix);
-                if (__any_sync(full_mask, pref)) {
-                    if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
+                if (__any_sync(full_mask, matched)) {
+                    if (matched) {
                         if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                             uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                             uint64_t sub=(uint64_t)(i+1);
@@ -293,16 +396,30 @@ __global__ void kernel_point_add_and_check_oneinv(
             ModSub256(px3, px3, x1);
             ModSub256(px3, px3, px_i);
 
-            ModSub256(s, x1, px3);
-            _ModMult(s, s, lam);
-            uint8_t odd; ModSub256isOdd(s, y1, &odd);
-
-            uint8_t h20[20]; getHash160_33_from_limbs(odd?0x03:0x02, px3, h20);
+            // Deferred parity: try 0x02, then 0x03
+            uint32_t _h160_a[5];
+            bool m02 = getHash160_33_from_limbs_matches(0x02, px3, c_target_hash160, target_prefix,
+                _vanity_active ? _h160_a : nullptr);
             ++local_hashes; MAYBE_WARP_FLUSH();
+            if (_vanity_active) {
+                vanity_check_and_save(_h160_a, 0x02, S, px3, d_vanity_count, d_vanity_buf, vanity_max_results);
+            }
+            bool matched;
+            if (!m02) {
+                uint32_t _h160_b[5];
+                bool m03 = getHash160_33_from_limbs_matches(0x03, px3, c_target_hash160, target_prefix,
+                    _vanity_active ? _h160_b : nullptr);
+                ++local_hashes; MAYBE_WARP_FLUSH();
+                if (_vanity_active) {
+                    vanity_check_and_save(_h160_b, 0x03, S, px3, d_vanity_count, d_vanity_buf, vanity_max_results);
+                }
+                matched = m03;
+            } else {
+                matched = true;
+            }
 
-            bool pref = hash160_prefix_equals(h20, target_prefix);
-            if (__any_sync(full_mask, pref)) {
-                if (pref && hash160_matches_prefix_then_full(h20, c_target_hash160, target_prefix)) {
+            if (__any_sync(full_mask, matched)) {
+                if (matched) {
                     if (atomicCAS(d_found_flag, FOUND_NONE, FOUND_LOCK) == FOUND_NONE) {
                         uint64_t fs[4]; for (int k=0;k<4;++k) fs[k]=S[k];
                         uint64_t sub=(uint64_t)half;
@@ -398,6 +515,13 @@ struct GpuShared {
     std::atomic<uint64_t>           cur_scalar_lo{0};
     std::atomic<uint64_t>           cur_scalar_hi{0};
     std::atomic<int>                setup_done{0};
+    long double                     total_keys_adjusted{0.0L};
+    std::atomic<uint32_t>           vanity_total{0};
+    // Vanity config
+    uint32_t                        vanity_nibbles{0};       // how many hex chars to match against target
+    uint32_t                        vanity_max_results{65536};
+    std::vector<VanityResult>       vanity_results;
+    std::mutex                      vanity_mtx;
 };
 
 static std::mutex g_print_mutex;
@@ -452,7 +576,7 @@ static void run_on_gpu(
     }
     if ((q_div_batch[3] | q_div_batch[2] | q_div_batch[1]) != 0ull) {
         std::lock_guard<std::mutex> lk(g_print_mutex);
-        fprintf(stderr, "[GPU %d] Error: range too large.\n", gpu_id);
+        fprintf(stderr, "[GPU %d] %s\n", gpu_id, ERR_RANGE_LARGE());
         std::exit(EXIT_FAILURE);
     }
     uint64_t total_batches_u64 = q_div_batch[0];
@@ -473,6 +597,8 @@ static void run_on_gpu(
         total_batches_u64 += threadsTotal - rem;
         add256_u64(gpu_range_len, (threadsTotal - rem) * (uint64_t)runtime_points_batch_size, gpu_range_len);
     }
+
+    shared.total_keys_adjusted = ld_from_u256(gpu_range_len);
 
     int blocks = (int)(threadsTotal / (uint64_t)threadsPerBlock);
 
@@ -497,6 +623,20 @@ static void run_on_gpu(
 
         ck(hipMemcpyToSymbol(HIP_SYMBOL(c_target_prefix),  &prefix_le,    sizeof(prefix_le)), "ToSymbol c_target_prefix");
         ck(hipMemcpyToSymbol(HIP_SYMBOL(c_target_hash160), target_hash160, 20),               "ToSymbol c_target_hash160");
+    }
+
+    // Vanity constants & buffers
+    VanityResult *d_vanity_buf = nullptr;
+    uint32_t *d_vanity_count_gpu = nullptr;
+    if (shared.vanity_nibbles > 0) {
+        uint32_t compare_bytes = shared.vanity_nibbles / 2;
+        uint32_t match_nibble  = shared.vanity_nibbles % 2;
+        ck(hipMemcpyToSymbol(HIP_SYMBOL(c_vanity_compare_bytes), &compare_bytes, 4), "vanity_cmp_bytes");
+        ck(hipMemcpyToSymbol(HIP_SYMBOL(c_vanity_match_nibble),  &match_nibble,  4), "vanity_match_nib");
+        ck(hipMalloc(&d_vanity_count_gpu, sizeof(uint32_t)), "vanity_count");
+        ck(hipMalloc(&d_vanity_buf, (size_t)shared.vanity_max_results * sizeof(VanityResult)), "vanity_buf");
+        uint32_t vz = 0;
+        ck(hipMemcpy(d_vanity_count_gpu, &vz, sizeof(uint32_t), hipMemcpyHostToDevice), "init vanity_count");
     }
 
     // Host buffers (plain malloc — no hipHostAlloc needed for one-time upload)
@@ -617,14 +757,14 @@ static void run_on_gpu(
         std::lock_guard<std::mutex> lk(g_print_mutex);
         std::cout << "======== GPU " << gpu_id << " : " << prop.name
                   << " (compute " << prop.major << "." << prop.minor << ") ========\n";
-        std::cout << std::left << std::setw(20) << "SM"                 << " : " << prop.multiProcessorCount << "\n";
-        std::cout << std::left << std::setw(20) << "ThreadsPerBlock"    << " : " << threadsPerBlock << "\n";
-        std::cout << std::left << std::setw(20) << "Blocks"             << " : " << blocks << "\n";
-        std::cout << std::left << std::setw(20) << "Total threads"      << " : " << threadsTotal << "\n";
-        std::cout << std::left << std::setw(20) << "Points batch size"  << " : " << B << "\n";
-        std::cout << std::left << std::setw(20) << "Batches/SM"         << " : " << runtime_batches_per_sm << "\n";
-        std::cout << std::left << std::setw(20) << "Batches/launch"     << " : " << slices_per_launch << " (per thread)\n";
-        std::cout << std::left << std::setw(20) << "Memory utilization" << " : "
+        std::cout << std::left << std::setw(20) << LBL_SM()              << " : " << prop.multiProcessorCount << "\n";
+        std::cout << std::left << std::setw(20) << LBL_THREADS_BLOCK()   << " : " << threadsPerBlock << "\n";
+        std::cout << std::left << std::setw(20) << LBL_BLOCKS()          << " : " << blocks << "\n";
+        std::cout << std::left << std::setw(20) << LBL_TOTAL_THREADS()   << " : " << threadsTotal << "\n";
+        std::cout << std::left << std::setw(20) << LBL_BATCH_SIZE()      << " : " << B << "\n";
+        std::cout << std::left << std::setw(20) << LBL_BATCHES_SM()      << " : " << runtime_batches_per_sm << "\n";
+        std::cout << std::left << std::setw(20) << LBL_BATCHES_LAUNCH()  << " : " << slices_per_launch << " (per thread)\n";
+        std::cout << std::left << std::setw(20) << LBL_MEM_UTIL()        << " : "
                   << std::fixed << std::setprecision(1) << util << "% ("
                   << human_bytes((double)(totalB - freeB)) << " / " << human_bytes((double)totalB) << ")\n";
         std::cout << "------------------------------------------------------- \n";
@@ -641,6 +781,7 @@ static void run_on_gpu(
     unsigned long long last_hashes_gpu = 0ull;
     bool stop_all    = false;
     bool completed_all = false;
+    uint32_t last_vanity_count = 0;
 
     // Random mode: range for chunk selection and RNG
     uint64_t full_range_len[4];
@@ -768,7 +909,10 @@ static void run_on_gpu(
             d_start_scalars, d_counts256,
             threadsTotal, B, slices_per_launch,
             d_found_flag, d_found_result,
-            d_hashes_accum, d_any_left
+            d_hashes_accum, d_any_left,
+            d_vanity_count_gpu,
+            d_vanity_buf,
+            shared.vanity_max_results
         );
         hipError_t launchErr = hipGetLastError();
         if (launchErr != hipSuccess) {
@@ -853,6 +997,27 @@ static void run_on_gpu(
             }
         }
 
+        // Read back vanity results from this launch
+        if (shared.vanity_nibbles > 0 && d_vanity_count_gpu) {
+            uint32_t current_count = 0;
+            hipMemcpy(&current_count, d_vanity_count_gpu, sizeof(uint32_t), hipMemcpyDeviceToHost);
+            uint32_t capped = std::min(current_count, shared.vanity_max_results);
+            if (capped > last_vanity_count) {
+                uint32_t n_new = capped - last_vanity_count;
+                std::vector<VanityResult> results(n_new);
+                hipMemcpy(results.data(),
+                          (VanityResult*)d_vanity_buf + last_vanity_count,
+                          (size_t)n_new * sizeof(VanityResult), hipMemcpyDeviceToHost);
+                {
+                    std::lock_guard<std::mutex> lk(shared.vanity_mtx);
+                    shared.vanity_results.insert(shared.vanity_results.end(),
+                                                  results.begin(), results.end());
+                }
+                shared.vanity_total.fetch_add(n_new, std::memory_order_relaxed);
+            }
+            last_vanity_count = capped;
+        }
+
         if (stop_all || g_sigint) break;
 
         unsigned int h_any = 0u;
@@ -869,6 +1034,28 @@ static void run_on_gpu(
 
     hipDeviceSynchronize();
 
+    // Read back any remaining vanity results (from the last kernel launch)
+    if (shared.vanity_nibbles > 0 && d_vanity_count_gpu) {
+        uint32_t current_count = 0;
+        hipMemcpy(&current_count, d_vanity_count_gpu, sizeof(uint32_t), hipMemcpyDeviceToHost);
+        uint32_t capped = std::min(current_count, shared.vanity_max_results);
+        if (capped > last_vanity_count) {
+            uint32_t n_new = capped - last_vanity_count;
+            std::vector<VanityResult> results(n_new);
+            hipMemcpy(results.data(),
+                      (VanityResult*)d_vanity_buf + last_vanity_count,
+                      (size_t)n_new * sizeof(VanityResult), hipMemcpyDeviceToHost);
+            {
+                std::lock_guard<std::mutex> lk(shared.vanity_mtx);
+                shared.vanity_results.insert(shared.vanity_results.end(),
+                                              results.begin(), results.end());
+            }
+            shared.vanity_total.fetch_add(n_new, std::memory_order_relaxed);
+        }
+        hipFree(d_vanity_count_gpu);
+        if (d_vanity_buf) hipFree(d_vanity_buf);
+    }
+
     hipFree(d_start_scalars); hipFree(d_Px); hipFree(d_Py);
     hipFree(d_Rx); hipFree(d_Ry); hipFree(d_counts256);
     hipFree(d_found_flag); hipFree(d_found_result);
@@ -883,7 +1070,7 @@ static void run_on_gpu(
 int main(int argc, char** argv) {
     std::signal(SIGINT, handle_sigint);
 
-    std::string target_hash_hex, range_hex, address_b58;
+    std::string target_hash_hex, range_hex, address_b58, vanity_hex;
     uint32_t runtime_points_batch_size = 128;
     uint32_t runtime_batches_per_sm    = 8;
     uint32_t slices_per_launch         = 64;
@@ -911,35 +1098,77 @@ int main(int argc, char** argv) {
         a_out=(uint32_t)aa; b_out=(uint32_t)bb; return true;
     };
 
+    // Load persisted language, then pre-scan --lang for override
+    load_lang_config();
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--lang" && i + 1 < argc) {
+            std::string l = argv[++i];
+            if (l == "pt" || l == "PT") g_lang = LangId::PT;
+        }
+    }
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--help" || arg == "-h") {
-            std::cout << "BRBtcHuntAMD — GPU Satoshi Puzzle Solver (ROCm/HIP)\n"
-                      << "\n"
-                      << "Usage: " << argv[0]
-                      << " --range <start_hex>:<end_hex> --address <base58>\n"
-                      << "       [--grid A,B] [--slices N] [--gpus all|0|0,1] [--random]\n"
-                      << "\n"
-                      << "Required:\n"
-                      << "  --range <start:end>        Search range in hex (e.g. 2000000000:3FFFFFFFFF)\n"
-                      << "  --address <base58>         P2PKH address to search for\n"
-                      << "  --target-hash160 <hex>     Alternative to --address (raw hash160)\n"
-                      << "\n"
-                      << "Options:\n"
-                      << "  --grid <P,T>               Points per batch, threads per block (e.g. 512,256)\n"
-                      << "  --slices <N>                Batches per thread per kernel launch\n"
-                      << "  --gpus <all|0|0,1>         Select which GPUs to use (default: all)\n"
-                      << "  --random                   Lottery mode: random jumps across the range\n"
-                      << "  -h, --help                 Show this help\n"
-                      << "\n"
-                      << "Examples:\n"
-                      << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --grid 128,128\n"
-                      << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --gpus 0,1 --random --slices 16\n"
-                      << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --gpus 0\n"
-                      << "\n"
-                      << "Multi-GPU: auto-detects all CUDA GPUs. Use --gpus to select specific ones.\n"
-                      << "Random mode: each GPU independently jumps to random positions.\n"
-                      << "Proof test: python3 proof.py --range 200000000:3FFFFFFFF --grid 128,128\n";
+            if (g_lang == LangId::PT) {
+                std::cout << "BRBtcHuntAMD \xe2\x80\x94 Quebrador de Puzzle Bitcoin (ROCm/HIP)\n"
+                          << "\n"
+                          << "Uso: " << argv[0]
+                          << " --range <inicio_hex>:<fim_hex> --address <base58>\n"
+                          << "       [--grid A,B] [--slices N] [--gpus all|0|0,1] [--random]\n"
+                          << "\n"
+                          << "Obrigatorio:\n"
+                          << "  --range <inicio:fim>      Intervalo em hex (ex: 2000000000:3FFFFFFFFF)\n"
+                          << "  --address <base58>        Endereco P2PKH para buscar\n"
+                          << "  --target-hash160 <hex>    Alternativa ao --address (hash160 raw)\n"
+                          << "\n"
+                          << "Opcoes:\n"
+                          << "  --grid <P,T>               Pontos por lote, threads por bloco (ex: 512,256)\n"
+                          << "  --slices <N>               Lotes por thread por execucao do kernel\n"
+                          << "  --gpus <all|0|0,1>        Seleciona GPUs (padrao: all)\n"
+                          << "  --random                  Modo loteria: saltos aleatorios pelo intervalo\n"
+                          << "  --vanity <N>               Salva chaves cujo hash160 comeca c/ N chars\n"
+                          << "  --lang pt|en               Idioma (padrao: en)\n"
+                          << "  -h, --help                Mostra esta ajuda\n"
+                          << "\n"
+                          << "Exemplos:\n"
+                          << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp...\n"
+                          << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --gpus 0,1 --random\n"
+                          << "\n"
+                          << "Multi-GPU: detecta todas GPUs. Use --gpus para selecionar.\n"
+                          << "Modo aleatorio: cada GPU salta para posicoes independentes.\n"
+                          << "Teste: python3 proof.py --range 200000000:3FFFFFFFF --grid 128,128\n";
+            } else {
+                std::cout << "BRBtcHuntAMD \xe2\x80\x94 GPU Satoshi Puzzle Solver (ROCm/HIP)\n"
+                          << "\n"
+                          << "Usage: " << argv[0]
+                          << " --range <start_hex>:<end_hex> --address <base58>\n"
+                          << "       [--grid A,B] [--slices N] [--gpus all|0|0,1] [--random]\n"
+                          << "\n"
+                          << "Required:\n"
+                          << "  --range <start:end>        Search range in hex (e.g. 2000000000:3FFFFFFFFF)\n"
+                          << "  --address <base58>         P2PKH address to search for\n"
+                          << "  --target-hash160 <hex>     Alternative to --address (raw hash160)\n"
+                          << "\n"
+                          << "Options:\n"
+                          << "  --grid <P,T>               Points per batch, threads per block (e.g. 512,256)\n"
+                          << "  --slices <N>                Batches per thread per kernel launch\n"
+                          << "  --gpus <all|0|0,1>         Select which GPUs to use (default: all)\n"
+                          << "  --random                   Lottery mode: random jumps across the range\n"
+                          << "  --vanity <N>               Save keys whose first N hex chars of hash160 match the target\n"
+                          << "  --lang pt|en               Language: Portuguese / English (default: en)\n"
+                          << "  -h, --help                 Show this help\n"
+                          << "\n"
+                          << "Examples:\n"
+                          << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --grid 128,128\n"
+                          << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --gpus 0,1 --random --slices 16\n"
+                          << "  ./BRBtcHuntAMD --range 200000000:3FFFFFFFF --address 1HBtAp... --gpus 0\n"
+                          << "\n"
+                          << "Multi-GPU: auto-detects all CUDA GPUs. Use --gpus to select specific ones.\n"
+                          << "Random mode: each GPU independently jumps to random positions.\n"
+                          << "Proof test: python3 proof.py --range 200000000:3FFFFFFFF --grid 128,128\n";
+            }
             return EXIT_SUCCESS;
         }
         if      (arg == "--target-hash160" && i + 1 < argc) target_hash_hex = argv[++i];
@@ -948,7 +1177,7 @@ int main(int argc, char** argv) {
         else if (arg == "--grid"           && i + 1 < argc) {
             uint32_t a=0,b=0;
             if (!parse_grid(argv[++i], a, b)) {
-                std::cerr << "Error: --grid expects \"A,B\" (positive integers).\n";
+                std::cerr << ERR_GRID_FMT() << "\n";
                 return EXIT_FAILURE;
             }
             runtime_points_batch_size = a;
@@ -958,7 +1187,7 @@ int main(int argc, char** argv) {
             char* endp=nullptr;
             unsigned long v = std::strtoul(argv[++i], &endp, 10);
             if (*endp != '\0' || v == 0ul || v > (1ul<<20)) {
-                std::cerr << "Error: --slices must be in 1.." << (1u<<20) << "\n";
+                std::cerr << ERR_SLICES() << " 1.." << (1u<<20) << "\n";
                 return EXIT_FAILURE;
             }
             slices_per_launch = (uint32_t)v;
@@ -970,26 +1199,48 @@ int main(int argc, char** argv) {
         else if (arg == "--random") {
             random_mode = true;
         }
+        else if (arg == "--vanity" && i + 1 < argc) {
+            vanity_hex = argv[++i];
+            char* end = nullptr;
+            long n = std::strtol(vanity_hex.c_str(), &end, 10);
+            if (end == vanity_hex.c_str() || *end != '\0' || n < 1 || n > 40) {
+                std::cerr << ERR_VANITY() << "\n";
+                return EXIT_FAILURE;
+            }
+        }
+        else if (arg == "--lang" && i + 1 < argc) {
+            std::string l = argv[++i];
+            if (l == "pt" || l == "PT") g_lang = LangId::PT;
+            else if (l == "en" || l == "EN") g_lang = LangId::EN;
+            else { std::cerr << "Error: --lang pt|en\n"; return EXIT_FAILURE; }
+            save_lang_config();
+        }
     }
 
+
+
     if (range_hex.empty() || (target_hash_hex.empty() && address_b58.empty())) {
+    if (g_lang == LangId::PT)
+        std::cerr << "Uso: " << argv[0]
+                  << " --range <inicio_hex>:<fim_hex> (--address <base58> | --target-hash160 <hash160_hex>) [--grid A,B] [--slices N] [--gpus all|0|0,1] [--random]\n";
+    else
         std::cerr << "Usage: " << argv[0]
                   << " --range <start_hex>:<end_hex> (--address <base58> | --target-hash160 <hash160_hex>) [--grid A,B] [--slices N] [--gpus all|0|0,1] [--random]\n";
         return EXIT_FAILURE;
     }
     if (!target_hash_hex.empty() && !address_b58.empty()) {
-        std::cerr << "Error: provide either --address or --target-hash160, not both.\n";
+        std::cerr << ERR_BOTH_TARGET() << "\n";
         return EXIT_FAILURE;
     }
 
     size_t colon_pos = range_hex.find(':');
-    if (colon_pos == std::string::npos) { std::cerr << "Error: range format must be start:end\n"; return EXIT_FAILURE; }
+    if (colon_pos == std::string::npos) { std::cerr << ERR_RANGE_FORMAT() << "\n"; return EXIT_FAILURE; }
     std::string start_hex = range_hex.substr(0, colon_pos);
     std::string end_hex   = range_hex.substr(colon_pos + 1);
 
     uint64_t range_start[4]{0}, range_end[4]{0};
     if (!hexToLE64(start_hex, range_start) || !hexToLE64(end_hex, range_end)) {
-        std::cerr << "Error: invalid range hex\n"; return EXIT_FAILURE;
+        std::cerr << ERR_INVALID_RANGE() << "\n"; return EXIT_FAILURE;
     }
 
     uint8_t target_hash160[20];
@@ -1015,7 +1266,7 @@ int main(int argc, char** argv) {
     // Detect GPUs
     int num_gpus_avail = 0;
     if (hipGetDeviceCount(&num_gpus_avail) != hipSuccess || num_gpus_avail == 0) {
-        std::cerr << "No CUDA-capable GPUs found.\n";
+        std::cerr << ERR_NO_GPU() << "\n";
         return EXIT_FAILURE;
     }
 
@@ -1040,14 +1291,14 @@ int main(int argc, char** argv) {
                 char* endp = nullptr;
                 unsigned long idx = std::strtoul(tok.c_str(), &endp, 10);
                 if (*endp != '\0' || idx >= (unsigned long)num_gpus_avail) {
-                    std::cerr << "Error: invalid GPU index '" << tok
+                    std::cerr << ERR_GPU_INDEX() << " " << tok
                               << "'. Available GPUs: 0.." << (num_gpus_avail - 1) << "\n";
                     return EXIT_FAILURE;
                 }
                 selected_gpus.push_back((int)idx);
             }
             if (selected_gpus.empty()) {
-                std::cerr << "Error: --gpus must be 'all' or a comma-separated list of GPU indices.\n";
+                std::cerr << ERR_GPU_FORMAT() << "\n";
                 return EXIT_FAILURE;
             }
         }
@@ -1103,6 +1354,15 @@ int main(int argc, char** argv) {
     GpuShared shared;
     std::atomic<int> gpus_running{num_gpus};
 
+    // Vanity setup (if --vanity specified)
+    if (!vanity_hex.empty()) {
+        shared.vanity_nibbles = (uint32_t)std::strtol(vanity_hex.c_str(), nullptr, 10);
+        uint32_t vbytes = shared.vanity_nibbles / 2;
+        if (shared.vanity_nibbles % 2) ++vbytes;
+        std::cout << VANITY_MATCHING() << " " << shared.vanity_nibbles
+                  << " " << VANITY_HEX_CHARS() << " (" << vbytes << " bytes)\n";
+    }
+
     // Launch worker threads
     std::vector<std::thread> workers;
     uint8_t target_copy[20];
@@ -1123,7 +1383,7 @@ int main(int argc, char** argv) {
         });
     }
 
-    std::cout << "\n======== Phase-1: " << (random_mode ? "Lottery / Random Jump" : "BruteForce") << " ("
+    std::cout << "\n" << HDR_PHASE1() << ": " << (random_mode ? (g_lang == LangId::PT ? "Loteria" : "Lottery / Random Jump") : "BruteForce") << " ("
               << num_gpus << " GPU" << (num_gpus > 1 ? "s" : "") << ") =====\n";
     if (random_mode) {
         uint64_t ck = (uint64_t)runtime_points_batch_size * slices_per_launch;
@@ -1133,7 +1393,7 @@ int main(int argc, char** argv) {
         else if (ck >= 1000ULL)       ck_s = std::to_string(ck/1000ULL)       + "K";
         else                          ck_s = std::to_string(ck);
         std::cout << "(random mode: ~" << ck_s
-                  << " keys/thread per chunk; lower --slices = more frequent jumps)\n";
+                  << " keys/thread per chunk; " << (g_lang == LangId::PT ? "menos --slices = saltos mais frequentes" : "lower --slices = more frequent jumps") << ")\n";
     }
     std::cout.flush();
 
@@ -1154,8 +1414,9 @@ int main(int argc, char** argv) {
             double mkeys  = delta / (dt * 1e6);
             total_elapsed = std::chrono::duration<double>(now - t0).count();
             double elapsed = total_elapsed;
-            long double prog = total_keys_ld > 0.0L
-                               ? ((long double)h_hashes / total_keys_ld) * 100.0L : 0.0L;
+            long double range_total = (shared.total_keys_adjusted > 0.0L) ? shared.total_keys_adjusted : total_keys_ld;
+            long double prog = range_total > 0.0L
+                               ? ((long double)h_hashes / range_total) * 100.0L : 0.0L;
             if (prog > 100.0L) prog = 100.0L;
 
             double speed_val = mkeys;
@@ -1169,19 +1430,25 @@ int main(int argc, char** argv) {
                 unsigned long long chunks = shared.chunks_tried.load(std::memory_order_relaxed);
                 uint64_t s_lo = shared.cur_scalar_lo.load(std::memory_order_relaxed);
                 uint64_t s_hi = shared.cur_scalar_hi.load(std::memory_order_relaxed);
-                std::cout << "\rTime: " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
-                          << " s | Speed: " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
-                          << " " << speed_unit << " | Count: " << std::setw(14) << h_hashes
-                          << " | Key: " << std::hex;
+                std::cout << "\r" << LBL_TIME() << ": " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
+                          << " s | " << LBL_SPEED() << ": " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
+                          << " " << speed_unit << " | " << LBL_COUNT() << ": " << std::setw(14) << h_hashes
+                          << " | " << LBL_KEY() << ": " << std::hex;
                 if (s_hi) { std::cout << s_hi << s_lo; }
                 else       { std::cout << s_lo; }
                 std::cout << std::dec
-                          << " | Chunks: " << std::setw(6) << chunks << "   ";
+                          << " | " << LBL_CHUNKS() << ": " << std::setw(6) << chunks;
+                if (shared.vanity_nibbles)
+                    std::cout << " | " << LBL_VANITY() << ": " << shared.vanity_total.load(std::memory_order_relaxed);
+                std::cout << "   ";
             } else {
-                std::cout << "\rTime: " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
-                          << " s | Speed: " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
-                          << " " << speed_unit << " | Count: " << std::setw(14) << h_hashes
-                          << " | Progress: " << std::fixed << std::setprecision(2) << std::setw(6) << (double)prog << " %   ";
+                std::cout << "\r" << LBL_TIME() << ": " << std::fixed << std::setprecision(1) << std::setw(6) << elapsed
+                          << " s | " << LBL_SPEED() << ": " << std::fixed << std::setprecision(2) << std::setw(7) << speed_val
+                          << " " << speed_unit << " | " << LBL_COUNT() << ": " << std::setw(14) << h_hashes
+                          << " | " << LBL_PROGRESS() << ": " << std::fixed << std::setprecision(2) << std::setw(6) << (double)prog << " %";
+                if (shared.vanity_nibbles)
+                    std::cout << " | " << LBL_VANITY() << ": " << shared.vanity_total.load(std::memory_order_relaxed);
+                std::cout << "   ";
             }
             std::cout.flush();
             lastHashes = h_hashes; tLast = now;
@@ -1192,6 +1459,46 @@ int main(int argc, char** argv) {
 
     // Only join workers after progress loop
     for (auto& t : workers) { if (t.joinable()) t.join(); }
+
+    // Save vanity results
+    if (!shared.vanity_results.empty()) {
+        auto hex_limbs = [](const uint64_t limbs[4]) -> std::string {
+            char buf[65];
+            for (int i = 3; i >= 0; --i)
+                sprintf(buf + (3-i)*16, "%016lx", limbs[i]);
+            buf[64] = '\0';
+            return std::string(buf);
+        };
+        auto fmt_compressed = [&](const VanityResult& vr) -> std::string {
+            // Build 33-byte compressed public key: prefix || X (big-endian)
+            std::string s;
+            s += (vr.prefix == 0x03 ? "03" : "02");
+            s += hex_limbs(vr.pubkey_x);
+            return s;
+        };
+        auto h160_str = [](const uint32_t h160[5]) -> std::string {
+            char buf[41];
+            const uint8_t* b = (const uint8_t*)h160;
+            for (int i = 0; i < 20; ++i)
+                sprintf(buf + i*2, "%02x", b[i]);
+            buf[40] = '\0';
+            return std::string(buf);
+        };
+
+        std::string fname = "vanity_results.txt";
+        std::ofstream ofs(fname, std::ios::app);
+        for (const auto& vr : shared.vanity_results) {
+            std::string priv_s = formatHex256(vr.privkey);
+            std::string pub_s  = fmt_compressed(vr);
+            std::string h160_s = h160_str(vr.hash160);
+            std::string line = priv_s + " " + pub_s + " " + h160_s + "\n";
+            if (ofs.is_open()) ofs << line;
+        }
+        if (ofs.is_open()) {
+            ofs.close();
+            std::cout << VANITY_SAVED() << " " << shared.vanity_results.size() << " vanity results to " << VANITY_RESULTS_FILE() << "\n";
+        }
+    }
 
     std::cout << "\n";
 
@@ -1205,16 +1512,19 @@ int main(int argc, char** argv) {
         double avg_disp = avg_speed;
         if (avg_disp >= 1000000.0) { avg_disp /= 1000000.0; avg_unit = "Tkeys/s"; }
         else if (avg_disp >= 1000.0) { avg_disp /= 1000.0; avg_unit = "Gkeys/s"; }
-        std::cout << "\n--- Summary ---\n";
-        std::cout << "Total keys  : " << h_total << "\n";
-        std::cout << "Time        : " << std::fixed << std::setprecision(2) << total_elapsed << " s\n";
-        std::cout << "Avg speed   : " << std::fixed << std::setprecision(2) << avg_disp << " " << avg_unit << "\n";
+        std::cout << "\n" << SUM_HEADER() << "\n";
+        std::cout << SUM_KEYS() << "  : " << h_total << "\n";
+        std::cout << SUM_TIME() << "        : " << std::fixed << std::setprecision(2) << total_elapsed << " s\n";
+        std::cout << SUM_AVG_SPEED() << "   : " << std::fixed << std::setprecision(2) << avg_disp << " " << avg_unit << "\n";
+        uint32_t nv = shared.vanity_total.load(std::memory_order_relaxed);
+        if (nv > 0)
+            std::cout << SUM_VANITY() << "   : " << nv << " (" << VANITY_SAVED() << " " << VANITY_RESULTS_FILE() << ")\n";
     };
 
     if (shared.has_result) {
-        std::cout << "\n======== FOUND MATCH! =================================\n";
-        std::cout << "Private Key   : " << formatHex256(shared.best_result.scalar) << "\n";
-        std::cout << "Public Key    : " << formatCompressedPubHex(shared.best_result.Rx, shared.best_result.Ry) << "\n";
+        std::cout << "\n" << RSLT_FOUND() << "\n";
+        std::cout << RSLT_PRIVKEY() << "   : " << formatHex256(shared.best_result.scalar) << "\n";
+        std::cout << RSLT_PUBKEY() << "    : " << formatCompressedPubHex(shared.best_result.Rx, shared.best_result.Ry) << "\n";
         print_summary();
     } else if (g_sigint) {
         std::cout << "======== INTERRUPTED (Ctrl+C) ==========================\n";
@@ -1222,7 +1532,7 @@ int main(int argc, char** argv) {
         print_summary();
         exit_code = 130;
     } else if (shared.gpus_exhausted.load() >= num_gpus) {
-        std::cout << "======== KEY NOT FOUND (exhaustive) ===================\n";
+        std::cout << RSLT_NOT_FOUND() << "\n";
         std::cout << "Target hash160 was not found within the specified range.\n";
         print_summary();
     } else {

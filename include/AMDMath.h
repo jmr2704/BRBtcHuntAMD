@@ -461,7 +461,7 @@ __device__ uint64_t AddCh(uint64_t r[5],uint64_t a[5],uint64_t carry_in) {
 }
 
 // ── Modular multiplication (256-bit field mul) ──────────────────────────
-__device__ void _ModMult(uint64_t *r,uint64_t *a,uint64_t *b) {
+__device__ __forceinline__ void _ModMult(uint64_t *r,uint64_t *a,uint64_t *b) {
   uint64_t r512[8],t[NBBLOCK],carry,ah,al;
   r512[5]=0;r512[6]=0;r512[7]=0;
   carry=0; UMult(r512,a,b[0]);
@@ -488,7 +488,7 @@ __device__ void _ModMult(uint64_t *r,uint64_t *a,uint64_t *b) {
   }
 }
 
-__device__ void _ModMult(uint64_t *r,uint64_t *a) {
+__device__ __forceinline__ void _ModMult(uint64_t *r,uint64_t *a) {
   uint64_t r512[8],t[NBBLOCK],carry,ah,al;
   r512[5]=0;r512[6]=0;r512[7]=0;
   carry=0; UMult(r512,a,r[0]);
@@ -515,7 +515,7 @@ __device__ void _ModMult(uint64_t *r,uint64_t *a) {
   }
 }
 
-__device__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
+__device__ __forceinline__ void _ModSqr(uint64_t *rp,const uint64_t *up) {
   uint64_t r512[8],SL,SH,r01L,r01H,r02L,r02H,r03L,r03H,carry;
   mul_lo_hi_u64(up[0],up[0],&SL,&SH);
   mul_lo_hi_u64(up[0],up[1],&r01L,&r01H);
