@@ -1,12 +1,15 @@
-# ── Makefile — BRBtcHuntAMD (HIP/ROCm port of CUDACyclone) ────────────
+# ── Makefile — BRBtcHuntAMD ───────────────────────────────────────────
+# Default backend: HIP/ROCm.
 # Targets: AMD Radeon RX 6600 (gfx1032), Vega iGPU (gfx90c)
 
 TARGET      := BRBtcHuntAMD
 SRC_DIR     := src
 INC_DIR     := include
+OBJ_DIR     := obj
 
-SRC         := $(SRC_DIR)/AMDcyclone.cpp
-OBJ         := $(SRC:.cpp=.o)
+# GPUWorker.cpp includes HashPipeline.cpp as a single TU
+SRCS        := $(SRC_DIR)/main.cpp $(SRC_DIR)/GPUWorker.cpp
+OBJS        := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
 
 CC          := hipcc
 
@@ -15,30 +18,40 @@ CC          := hipcc
 # Detect automatically via rocminfo, or use pre-defined
 GPU_ARCHS  ?= gfx1032 gfx90c
 
-GENCODE    := $(foreach arch,$(GPU_ARCHS),--offload-arch=$(arch))
+GENCODE     = $(foreach arch,$(GPU_ARCHS),--offload-arch=$(arch))
 
 # ── Compiler flags ────────────────────────────────────────────────────
-HIP_FLAGS  := -O3 -ffast-math -std=c++17
-HIP_FLAGS  += -I$(INC_DIR)
-HIP_FLAGS  += $(GENCODE)
-HIP_FLAGS  += -Wno-unused-result -Wno-ignored-attributes
+HIP_FLAGS_BASE := -O3 -ffast-math -std=c++17
+HIP_FLAGS_BASE += -I$(INC_DIR)
+HIP_FLAGS_BASE += -DBTC_GPU_BACKEND_HIP=1
+HIP_FLAGS_BASE += -Wno-unused-result -Wno-ignored-attributes
+HIP_FLAGS       = $(HIP_FLAGS_BASE) $(GENCODE)
 
-# Linker flags
-LDFLAGS    := -L/opt/rocm/lib -lamdhip64
+# Linker flags. Linux ROCm commonly needs libamdhip64 explicitly; Windows
+# HIP SDK builds should let hipcc discover the SDK libraries from its env.
+ROCM_PATH  ?= /opt/rocm
+ifeq ($(OS),Windows_NT)
+LDFLAGS    ?=
+else
+LDFLAGS    ?= -L$(ROCM_PATH)/lib -lamdhip64
+endif
 
 all: $(TARGET)
 
-$(TARGET): $(OBJ)
-	$(CC) $(HIP_FLAGS) $(OBJ) -o $@ $(LDFLAGS)
+$(OBJ_DIR):
+	mkdir -p $(OBJ_DIR)
 
-$(SRC_DIR)/%.o: $(SRC_DIR)/%.cpp
+$(TARGET): $(OBJS)
+	$(CC) $(HIP_FLAGS) $(OBJS) -o $@ $(LDFLAGS)
+
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
 	$(CC) $(HIP_FLAGS) -c $< -o $@
 
 # ── Phony targets ────────────────────────────────────────────────────
 .PHONY: clean run info
 
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -rf $(OBJ_DIR) $(TARGET)
 
 run: $(TARGET)
 	./$(TARGET) --help
@@ -50,7 +63,7 @@ info:
 	hipcc --version 2>/dev/null | head -2 || echo "hipcc not found"
 
 # Debug build
-debug: HIP_FLAGS := -O0 -g -std=c++17 -I$(INC_DIR) $(GENCODE) -Wno-unused-result
+debug: HIP_FLAGS_BASE := -O0 -g -std=c++17 -I$(INC_DIR) -DBTC_GPU_BACKEND_HIP=1 -Wno-unused-result
 debug: clean $(TARGET)
 
 # Single GPU architecture (fast build)
@@ -58,6 +71,4 @@ debug: clean $(TARGET)
 fast: GPU_ARCHS := gfx1032
 fast: clean $(TARGET)
 
-cpu:
-	$(warning Building for CPU fallback — no GPU acceleration)
-	$(CC) $(HIP_FLAGS) --offload-arch=gfx1032 --offload-arch=gfx90c $(SRC) -o $(TARGET) $(LDFLAGS)
+# cpu target removed — BRBtcHuntAMD is GPU-only

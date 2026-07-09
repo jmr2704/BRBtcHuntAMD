@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include "GpuPlatform.h"
 
 #define NBBLOCK 5
 #define BIFULLSIZE 40

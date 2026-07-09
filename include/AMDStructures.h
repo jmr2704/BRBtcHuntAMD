@@ -2,6 +2,7 @@
 #define AMD_STRUCTURES_H
 
 #include <cstdint>
+#include "GpuPlatform.h"
 
 #define WARP_SIZE 32
 #define FOUND_NONE  0
@@ -16,7 +17,7 @@ struct FoundResult {
     uint64_t Ry[4];
 };
 
-// ── HIP constant memory (equivalent to __constant__ in CUDA) ──────────
+// ── Backend device-side target constants ──────────────────────────────
 __device__ uint8_t  c_target_hash160[20];
 __device__ uint32_t c_target_prefix;
 
@@ -24,10 +25,8 @@ __device__ uint32_t c_target_prefix;
 __global__ void scalarMulKernelBase(const uint64_t* scalars_in,
                                      uint64_t* outX, uint64_t* outY, int N);
 
-// ── HIP error checking macro ───────────────────────────────────────────
-#define HIP_CHECK(ans) do { hipError_t err = ans; if (err != hipSuccess) { \
-    std::cerr << "HIP Error: " << hipGetErrorString(err) << " at " \
-              << __FILE__ << ":" << __LINE__ << std::endl; exit(EXIT_FAILURE); } } while(0)
+// ── Backend error checking macro ───────────────────────────────────────
+#define HIP_CHECK(ans) BTC_GPU_CHECK(ans)
 
 __device__ __constant__ uint64_t Gx_d[4];
 __device__ __constant__ uint64_t Gy_d[4];

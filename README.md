@@ -98,6 +98,8 @@ Chave Publica : 03C060E1E3771CBECCB38E119C2414702F3F5181A89652538851D2E3886BDD70
 - [Modo Vanity](#-modo-vanity)
 - [Suporte a Idioma](#-suporte-a-idioma)
 - [Performance](#-performance)
+- [Estrutura do Projeto](#-estrutura-do-projeto)
+- [Scripts de Setup](#-scripts-de-setup)
 - [Doação](#-doação)
 - [Licença](#-licença)
 
@@ -120,8 +122,8 @@ Chave Publica : 03C060E1E3771CBECCB38E119C2414702F3F5181A89652538851D2E3886BDD70
 | Componente | Requisito |
 |-----------|-----------|
 | **GPU** | AMD com ROCm 6+ (RX 5000/6000/7000, Vega, série MI) |
-| **SO**  | Linux (Ubuntu 22.04+, Fedora 38+, Arch, etc.) |
-| **ROCm**| rocm-hip-sdk, rocm-llvm, hipcc |
+| **SO**  | Linux (Ubuntu 22.04+, Fedora 38+, Arch, etc.) **ou** Windows 10/11 |
+| **ROCm**| rocm-hip-sdk (Linux) / AMD HIP SDK for Windows |
 | **RAM** | 8 GB+ de memória do sistema |
 | **VRAM**| 4 GB+ (testado em 8 GB) |
 
@@ -131,7 +133,13 @@ Chave Publica : 03C060E1E3771CBECCB38E119C2414702F3F5181A89652538851D2E3886BDD70
 
 ## 🛠️ Instalação
 
-### 1. Instalar ROCm
+> 💡 **Setup automático:** Use os scripts em `scripts/` para instalar tudo de uma vez.
+> - Linux: `sudo ./scripts/setup-linux.sh`
+> - Windows: `.\scripts\setup-windows.ps1` (como Administrador)
+
+### Linux — Manual
+
+#### 1. Instalar ROCm
 
 ```bash
 # Ubuntu 22.04
@@ -143,7 +151,7 @@ hipcc --version
 rocminfo | grep gfx
 ```
 
-### 2. Clonar e compilar
+#### 2. Clonar e compilar
 
 ```bash
 git clone https://github.com/jmr2704/BRBtcHuntAMD.git
@@ -160,7 +168,7 @@ make GPU_ARCHS="gfx1032" -j$(nproc)
 make clean && make -j$(nproc)
 ```
 
-### 3. Teste rápido
+#### 3. Teste rápido
 
 ```bash
 # Encontrar a chave conhecida do puzzle (range = 1 chave)
@@ -168,6 +176,34 @@ make clean && make -j$(nproc)
                --address 1HBtApAFA9B2YZw3G2YKSMCtb3dVnjuNe2 \
                --grid 2048,32 --slices 64 --gpus 0
 ```
+
+### Windows — Manual
+
+#### 1. Instalar HIP SDK
+
+Baixe e instale o **AMD HIP SDK for Windows** em:
+https://rocm.docs.amd.com/en/latest/deploy/windows/install.html
+
+#### 2. Instalar dependências
+- **Visual Studio Build Tools** (com workload de C++)
+- **CMake** (opcional, o Makefile usa hipcc diretamente)
+- **Git**
+
+#### 3. Compilar
+
+Abra o **HIP SDK Command Prompt** ou **Developer Command Prompt** e execute:
+
+```bash
+cd BRBtcHuntAMD
+mkdir obj
+hipcc -O3 -ffast-math -std=c++17 -Iinclude -DBTC_GPU_BACKEND_HIP=1 ^
+      --offload-arch=gfx1032 -c src/main.cpp -o obj/main.o
+hipcc -O3 -ffast-math -std=c++17 -Iinclude -DBTC_GPU_BACKEND_HIP=1 ^
+      --offload-arch=gfx1032 -c src/GPUWorker.cpp -o obj/GPUWorker.o
+hipcc --offload-arch=gfx1032 obj/main.o obj/GPUWorker.o -o BRBtcHuntAMD.exe
+```
+
+> Ou instale o **MSYS2** com `make` e use o Makefile diretamente.
 
 ---
 
@@ -287,6 +323,73 @@ Troque entre **Português** e **Inglês**:
 
 ---
 
+## 📁 Estrutura do Projeto
+
+```
+BRBtcHuntAMD/
+├── src/
+│   ├── main.cpp            ← Ponto de entrada (CLI, GPU detection, progresso)
+│   ├── GPUWorker.cpp       ← Kernels HIP + run_on_gpu() (inclui HashPipeline.cpp)
+│   ├── HashPipeline.cpp    ← Pipeline hash (SHA-256 + RIPEMD-160 em GPU)
+├── include/
+│   ├── GPUWorker.h         ← Tipos compartilhados (GpuShared, FoundResult, VanityResult)
+│   ├── GpuPlatform.h       ← Shim de plataforma (HIP/CUDA/OpenCL)
+│   ├── AMDMath.h           ← Aritmética de curva elíptica (secp256k1)
+│   ├── AMDHash.h           ← Declarações de hash device
+│   ├── AMDStructures.h     ← Constantes da curva
+│   └── AMDUtils.h          ← Utilitários (hex, formato, leitura de range)
+├── scripts/
+│   ├── setup-linux.sh      ← Setup automatizado para Linux
+│   └── setup-windows.ps1   ← Setup automatizado para Windows
+├── Makefile
+└── README.md
+```
+
+> Anteriormente o projeto usava um único TU (`AMDcyclone.cpp` incluindo `_AMDcyclone.cpp` + `_AMDhash.cpp`).
+> A refatoração separou em `main.cpp` (host) e `GPUWorker.cpp` + `HashPipeline.cpp` (device),
+> eliminando o prefixo `_` e nomes não-profissionais.
+
+---
+
+## 🚀 Scripts de Setup
+
+### Linux
+
+```bash
+sudo ./scripts/setup-linux.sh
+```
+
+O script:
+1. Valida execução como root
+2. Detecta a distribuição (apt/pacman/dnf)
+3. Instala dependências do sistema (build-essential, cmake, git)
+4. Baixa e instala o ROCm HIP SDK automaticamente
+5. Compila o BRBtcHuntAMD
+6. Valida o binário com `--help`
+
+> ✅ Suporta Ubuntu, Debian, Arch Linux e Fedora.
+> 💬 Mensagens em Português e Inglês.
+
+### Windows
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+> ⚠️ Execute como **Administrador**.
+
+O script:
+1. Valida permissão de administrador
+2. Detecta winget, chocolatey ou usa download direto
+3. Instala Visual Studio Build Tools, CMake, Git, MSYS2
+4. Baixa e instala o AMD HIP SDK for Windows
+5. Compila o BRBtcHuntAMD.exe (make ou hipcc direto)
+6. Valida o binário com `--help`
+
+> 💬 Mensagens em Português e Inglês.
+
+---
+
 ## ⚡ Performance
 
 Medido em uma única **AMD Radeon RX 6600** (RDNA 2, 14 CUs, 8 GB VRAM).
@@ -365,6 +468,8 @@ Public Key    : 03C060E1E3771CBECCB38E119C2414702F3F5181A89652538851D2E3886BDD70
 - [Vanity Mode](#-vanity-mode-1)
 - [Language Support](#-language-support-1)
 - [Performance](#-performance-1)
+- [Project Structure](#-project-structure)
+- [Setup Scripts](#-setup-scripts)
 - [Donate](#-donate)
 - [License](#-license)
 
@@ -387,8 +492,8 @@ Public Key    : 03C060E1E3771CBECCB38E119C2414702F3F5181A89652538851D2E3886BDD70
 | Component | Requirement |
 |-----------|------------|
 | **GPU** | AMD with ROCm 6+ (RX 5000/6000/7000, Vega, MI series) |
-| **OS**  | Linux (Ubuntu 22.04+, Fedora 38+, Arch, etc.) |
-| **ROCm**| rocm-hip-sdk, rocm-llvm, hipcc |
+| **OS**  | Linux (Ubuntu 22.04+, Fedora 38+, Arch, etc.) **or** Windows 10/11 |
+| **ROCm**| rocm-hip-sdk (Linux) / AMD HIP SDK for Windows |
 | **RAM** | 8 GB+ system memory |
 | **VRAM**| 4 GB+ (tested on 8 GB) |
 
@@ -398,7 +503,13 @@ Public Key    : 03C060E1E3771CBECCB38E119C2414702F3F5181A89652538851D2E3886BDD70
 
 ## 🛠️ Installation
 
-### 1. Install ROCm
+> 💡 **Automated setup:** Use the scripts in `scripts/` to install everything at once.
+> - Linux: `sudo ./scripts/setup-linux.sh`
+> - Windows: `.\scripts\setup-windows.ps1` (run as Administrator)
+
+### Linux — Manual
+
+#### 1. Install ROCm
 
 ```bash
 # Ubuntu 22.04
@@ -410,7 +521,7 @@ hipcc --version
 rocminfo | grep gfx
 ```
 
-### 2. Clone & build
+#### 2. Clone & build
 
 ```bash
 git clone https://github.com/jmr2704/BRBtcHuntAMD.git
@@ -427,7 +538,7 @@ make GPU_ARCHS="gfx1032" -j$(nproc)
 make clean && make -j$(nproc)
 ```
 
-### 3. Quick test
+#### 3. Quick test
 
 ```bash
 # Find the known puzzle key (range = 1 key)
@@ -435,6 +546,34 @@ make clean && make -j$(nproc)
                --address 1HBtApAFA9B2YZw3G2YKSMCtb3dVnjuNe2 \
                --grid 2048,32 --slices 64 --gpus 0
 ```
+
+### Windows — Manual
+
+#### 1. Install HIP SDK
+
+Download and install the **AMD HIP SDK for Windows** from:
+https://rocm.docs.amd.com/en/latest/deploy/windows/install.html
+
+#### 2. Install dependencies
+- **Visual Studio Build Tools** (with C++ workload)
+- **CMake** (optional, the Makefile uses hipcc directly)
+- **Git**
+
+#### 3. Build
+
+Open the **HIP SDK Command Prompt** or **Developer Command Prompt** and run:
+
+```bash
+cd BRBtcHuntAMD
+mkdir obj
+hipcc -O3 -ffast-math -std=c++17 -Iinclude -DBTC_GPU_BACKEND_HIP=1 ^
+      --offload-arch=gfx1032 -c src/main.cpp -o obj/main.o
+hipcc -O3 -ffast-math -std=c++17 -Iinclude -DBTC_GPU_BACKEND_HIP=1 ^
+      --offload-arch=gfx1032 -c src/GPUWorker.cpp -o obj/GPUWorker.o
+hipcc --offload-arch=gfx1032 obj/main.o obj/GPUWorker.o -o BRBtcHuntAMD.exe
+```
+
+> Alternatively, install **MSYS2** with `make` and use the Makefile directly.
 
 ---
 
@@ -551,6 +690,73 @@ Switch between **English** and **Portuguese**:
 | FOUND MATCH | `FOUND MATCH!` | `CHAVE ENCONTRADA!` |
 | Summary | `Total keys`, `Avg speed` | `Total chaves`, `Veloc. med.` |
 | Config labels | `SM`, `Blocks`,... | `SM`, `Blocos`,... |
+
+---
+
+## 📁 Project Structure
+
+```
+BRBtcHuntAMD/
+├── src/
+│   ├── main.cpp            ← Entry point (CLI, GPU detection, progress display)
+│   ├── GPUWorker.cpp       ← HIP kernels + run_on_gpu() (includes HashPipeline.cpp)
+│   ├── HashPipeline.cpp    ← Hash pipeline (SHA-256 + RIPEMD-160 on GPU)
+├── include/
+│   ├── GPUWorker.h         ← Shared types (GpuShared, FoundResult, VanityResult)
+│   ├── GpuPlatform.h       ← Platform shim (HIP/CUDA/OpenCL)
+│   ├── AMDMath.h           ← Elliptic curve arithmetic (secp256k1)
+│   ├── AMDHash.h           ← Device hash declarations
+│   ├── AMDStructures.h     ← Curve constants
+│   └── AMDUtils.h          ← Utilities (hex, formatting, range parsing)
+├── scripts/
+│   ├── setup-linux.sh      ← Automated setup for Linux
+│   └── setup-windows.ps1   ← Automated setup for Windows
+├── Makefile
+└── README.md
+```
+
+> Previously the project used a single TU (`AMDcyclone.cpp` including `_AMDcyclone.cpp` + `_AMDhash.cpp`).
+> The refactor separated it into `main.cpp` (host) and `GPUWorker.cpp` + `HashPipeline.cpp` (device),
+> removing the `_` prefix convention and unprofessional naming.
+
+---
+
+## 🚀 Setup Scripts
+
+### Linux
+
+```bash
+sudo ./scripts/setup-linux.sh
+```
+
+The script:
+1. Validates root execution
+2. Detects the distribution (apt/pacman/dnf)
+3. Installs system dependencies (build-essential, cmake, git)
+4. Downloads and installs the ROCm HIP SDK automatically
+5. Builds BRBtcHuntAMD
+6. Validates the binary with `--help`
+
+> ✅ Supports Ubuntu, Debian, Arch Linux and Fedora.
+> 💬 Messages in Portuguese and English.
+
+### Windows
+
+```powershell
+.\scripts\setup-windows.ps1
+```
+
+> ⚠️ Run as **Administrator**.
+
+The script:
+1. Validates administrator privileges
+2. Detects winget, chocolatey or falls back to direct download
+3. Installs Visual Studio Build Tools, CMake, Git, MSYS2
+4. Downloads and installs the AMD HIP SDK for Windows
+5. Builds BRBtcHuntAMD.exe (make or direct hipcc)
+6. Validates the binary with `--help`
+
+> 💬 Messages in Portuguese and English.
 
 ---
 

@@ -10,7 +10,11 @@
 
 #include <cstdint>
 #include <cstring>
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 #include <string>
+#include "GpuPlatform.h"
 #include <sstream>
 #include <iomanip>
 #include <iostream>
@@ -59,9 +63,9 @@ __host__ __forceinline__ void inc256(uint64_t a[4], uint64_t inc) {
     }
 }
 
-__host__ void divmod_256_by_u64(const uint64_t value[4], uint64_t divisor,
+__host__ inline void divmod_256_by_u64(const uint64_t value[4], uint64_t divisor,
                                  uint64_t quotient[4], uint64_t &remainder) {
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
     remainder = 0;
     for (int i = 3; i >= 0; --i) {
         quotient[i] = _udiv128(remainder, value[i], divisor, &remainder);
@@ -78,7 +82,7 @@ __host__ void divmod_256_by_u64(const uint64_t value[4], uint64_t divisor,
 
 // ── Hex/format utilities ───────────────────────────────────────────────
 
-bool hexToLE64(const std::string& h_in, uint64_t w[4]) {
+inline bool hexToLE64(const std::string& h_in, uint64_t w[4]) {
     std::string h = h_in;
     if (h.size() >= 2 && (h[0] == '0') && (h[1] == 'x' || h[1] == 'X')) h = h.substr(2);
     if (h.size() > 64) return false;
@@ -91,7 +95,7 @@ bool hexToLE64(const std::string& h_in, uint64_t w[4]) {
     return true;
 }
 
-bool hexToHash160(const std::string& h, uint8_t hash160[20]) {
+inline bool hexToHash160(const std::string& h, uint8_t hash160[20]) {
     if (h.size() != 40) return false;
     for (int i = 0; i < 20; ++i) {
         std::string byteStr = h.substr(i * 2, 2);
@@ -100,7 +104,7 @@ bool hexToHash160(const std::string& h, uint8_t hash160[20]) {
     return true;
 }
 
-std::string formatHex256(const uint64_t limbs[4]) {
+inline std::string formatHex256(const uint64_t limbs[4]) {
     std::ostringstream oss;
     oss << std::hex << std::uppercase << std::setfill('0');
     for (int i = 3; i >= 0; --i) oss << std::setw(16) << limbs[i];
@@ -170,11 +174,11 @@ __device__ __forceinline__ void sub256_u64_inplace(uint64_t a[4], uint64_t dec) 
 // For older HIP versions, use __hip_shfl_down.
 __device__ __forceinline__ unsigned long long warp_reduce_add_ull(unsigned long long v) {
     uint64_t mask = 0xFFFFFFFFull;
-    v += __shfl_down_sync(mask, v, 16);
-    v += __shfl_down_sync(mask, v, 8);
-    v += __shfl_down_sync(mask, v, 4);
-    v += __shfl_down_sync(mask, v, 2);
-    v += __shfl_down_sync(mask, v, 1);
+    v += BTC_SHFL_DOWN_SYNC(mask, v, 16);
+    v += BTC_SHFL_DOWN_SYNC(mask, v, 8);
+    v += BTC_SHFL_DOWN_SYNC(mask, v, 4);
+    v += BTC_SHFL_DOWN_SYNC(mask, v, 2);
+    v += BTC_SHFL_DOWN_SYNC(mask, v, 1);
     return v;
 }
 

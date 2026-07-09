@@ -1,4 +1,4 @@
-#include <hip/hip_runtime.h>
+#include "GpuPlatform.h"
 #include "AMDHash.h"
 #include <cstdio>
 #include <cstdint>

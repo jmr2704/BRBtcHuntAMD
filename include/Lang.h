@@ -62,7 +62,7 @@ inline const char* ERR_RANGE_FORMAT()      { return _("Error: range format must 
 inline const char* ERR_INVALID_RANGE()     { return _("Error: invalid range hex",               "Erro: hex invalido no intervalo"); }
 inline const char* ERR_INVALID_ADDR()      { return _("Error: invalid P2PKH address",           "Erro: endereco P2PKH invalido"); }
 inline const char* ERR_INVALID_HASH160()   { return _("Error: invalid target hash160 hex",      "Erro: hash160 alvo invalido"); }
-inline const char* ERR_NO_GPU()            { return _("No HIP-capable GPUs found.",              "Nenhuma GPU HIP encontrada."); }
+inline const char* ERR_NO_GPU()            { return _("No compatible GPUs found.",              "Nenhuma GPU compatível encontrada."); }
 inline const char* ERR_GRID_FMT()          { return _("Error: --grid expects \"A,B\" (positive integers).", "Erro: --grid espera \"A,B\" (inteiros positivos)."); }
 inline const char* ERR_SLICES()            { return _("Error: --slices must be in",             "Erro: --slices deve estar entre"); }
 inline const char* ERR_VANITY()            { return _("Error: --vanity expects an integer 1-40 (number of matching hex chars).", "Erro: --vanity espera inteiro 1-40 (qtd caracteres hex)."); }
