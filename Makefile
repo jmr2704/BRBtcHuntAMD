@@ -14,9 +14,12 @@ OBJS        := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
 CC          := hipcc
 
 # ── GPU architectures ─────────────────────────────────────────────────
-# gfx1032 = RDNA 2 (RX 6600), gfx90c = Vega iGPU (Ryzen 5600G)
-# Detect automatically via rocminfo, or use pre-defined
-GPU_ARCHS  ?= gfx1032 gfx90c
+# Auto-detect via rocminfo (recommended), or fallback to common targets.
+# Run: make auto
+GPU_ARCHS  ?= $(shell rocminfo 2>/dev/null | grep -oP 'gfx\w+' | sort -u | tr '\n' ' ')
+ifeq ($(GPU_ARCHS),)
+  GPU_ARCHS := gfx1032 gfx90c gfx1010 gfx906
+endif
 
 GENCODE     = $(foreach arch,$(GPU_ARCHS),--offload-arch=$(arch))
 
@@ -33,7 +36,7 @@ ROCM_PATH  ?= /opt/rocm
 ifeq ($(OS),Windows_NT)
 LDFLAGS    ?=
 else
-LDFLAGS    ?= -L$(ROCM_PATH)/lib -lamdhip64
+LDFLAGS    ?= -L$(ROCM_PATH)/lib -lamdhip64 -lcrypto
 endif
 
 all: $(TARGET)
@@ -48,7 +51,7 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
 	$(CC) $(HIP_FLAGS) -c $< -o $@
 
 # ── Phony targets ────────────────────────────────────────────────────
-.PHONY: clean run info
+.PHONY: clean run info auto
 
 clean:
 	rm -rf $(OBJ_DIR) $(TARGET)
@@ -72,3 +75,11 @@ fast: GPU_ARCHS := gfx1032
 fast: clean $(TARGET)
 
 # cpu target removed — BRBtcHuntAMD is GPU-only
+
+# Auto-detect GPU architectures and build
+auto:
+	@echo "=== Detectando GPUs ==="
+	rocminfo 2>/dev/null | grep -oP 'gfx\w+' | sort -u || echo "rocminfo não disponível"
+	@echo ""
+	$(MAKE) clean
+	GPU_ARCHS="$$(rocminfo 2>/dev/null | grep -oP 'gfx\w+' | sort -u | tr '\n' ' ')" $(MAKE) all

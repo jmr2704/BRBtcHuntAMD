@@ -5,9 +5,8 @@
 #include "AMDHash.h"
 #include "AMDUtils.h"
 #include "Lang.h"
-#include "sha256.h"
-
 #include <cstdint>
+#include <openssl/sha.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +22,68 @@
 #include <vector>
 #include <array>
 #include <fstream>
+
+// ── Base58 decode ─────────────────────────────────────────────────────
+static const char* BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+static const int8_t BASE58_MAP[128] = {
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8,-1,-1,-1,-1,-1,-1,
+    -1, 9,10,11,12,13,14,15,16,-1,17,18,19,20,21,-1,
+    22,23,24,25,26,27,28,29,30,31,32,-1,-1,-1,-1,-1,
+    -1,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,
+    48,49,50,51,52,53,54,55,56,57,-1,-1,-1,-1,-1,-1
+};
+
+// Decode a Base58 address into raw 25 bytes (version + hash160 + checksum).
+// Returns false on invalid input.
+static bool decode_base58(const char* b58, uint8_t* out_25bytes) {
+    size_t len = strlen(b58);
+    if (len < 5 || len > 40) return false;
+    // Decode into big integer (256-bit max)
+    uint8_t digits[128] = {0};
+    size_t ndigits = 0;
+    for (size_t i = 0; i < len; ++i) {
+        int val = (b58[i] & 0x7f) < 128 ? BASE58_MAP[b58[i] & 0x7f] : -1;
+        if (val < 0) return false;
+        uint32_t carry = (uint32_t)val;
+        for (size_t j = 0; j < ndigits; ++j) {
+            carry += (uint32_t)digits[j] * 58;
+            digits[j] = (uint8_t)(carry & 0xFF);
+            carry >>= 8;
+        }
+        while (carry) {
+            digits[ndigits++] = (uint8_t)(carry & 0xFF);
+            carry >>= 8;
+        }
+    }
+    // Count leading zeros in Base58 input
+    size_t leading = 0;
+    while (leading < len && b58[leading] == '1') ++leading;
+    size_t total = leading + ndigits;
+    if (total != 25) return false;
+    // Write result (big-endian)
+    size_t pos = 0;
+    for (size_t z = 0; z < leading; ++z) out_25bytes[pos++] = 0;
+    for (size_t i = ndigits; i > 0; --i) out_25bytes[pos++] = digits[i - 1];
+    return true;
+}
+
+// Decode a P2PKH Base58 address, extract hash160 into hash20_out.
+// Returns true on success.
+static bool decode_p2pkh_address(const char* b58, uint8_t hash20_out[20]) {
+    uint8_t raw[25];
+    if (!decode_base58(b58, raw)) return false;
+    if (raw[0] != 0x00) return false; // mainnet P2PKH prefix
+    // Verify checksum: SHA256(SHA256(raw[:21]))[:4] == raw[21:25]
+    uint8_t hash1[32], hash2[32];
+    SHA256(raw, 21, hash1);
+    SHA256(hash1, 32, hash2);
+    if (memcmp(hash2, raw + 21, 4) != 0) return false;
+    memcpy(hash20_out, raw + 1, 20);
+    return true;
+}
 
 // ── Language globals ──────────────────────────────────────────────────
 LangId g_lang = LangId::EN;
@@ -226,7 +287,7 @@ int main(int argc, char** argv) {
 
     uint8_t target_hash160[20];
     if (!address_b58.empty()) {
-        if (!decode_p2pkh_address(address_b58, target_hash160)) {
+        if (!decode_p2pkh_address(address_b58.c_str(), target_hash160)) {
             std::cerr << "Error: invalid P2PKH address\n";
             return EXIT_FAILURE;
         }
@@ -323,7 +384,7 @@ int main(int argc, char** argv) {
               << " GPU" << (num_gpus > 1 ? "s" : "") << ") ===\n";
     for (int gi = 0; gi < num_gpus; ++gi) {
         int dev = selected_gpus[gi];
-        hipDeviceProp_t p{}; hipGetDeviceProperties(&p, dev);
+        hipDeviceProp_t p{}; (void)hipGetDeviceProperties(&p, dev);
         std::cout << "  GPU " << dev << " : " << p.name
                   << "  |  " << p.multiProcessorCount << " SMs"
                   << "  |  " << human_bytes((double)p.totalGlobalMem) << "\n";
