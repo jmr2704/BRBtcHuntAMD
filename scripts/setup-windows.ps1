@@ -611,17 +611,39 @@ if (-not $BuildSuccess) {
     if (Get-Command rocminfo -ErrorAction SilentlyContinue) {
         $gpuInfo = & rocminfo 2>&1 | Select-String "gfx[0-9a-f]+"
         if ($gpuInfo) {
-            $detectedArch = $gpuInfo.Matches.Value | Select-Object -First 1
-            if ($detectedArch) {
-                Write-Msg -Pt "Arquitetura de GPU detectada: $detectedArch" `
-                          -En "Detected GPU architecture: $detectedArch"
-                $gpuArch = $detectedArch
+            $detected = $gpuInfo.Matches.Value | Select-Object -Unique
+            if ($detected) {
+                $gpuArch = $detected -join ' '
+                Write-Msg -Pt "Arquitetura(s) de GPU detectada(s): $gpuArch" `
+                          -En "Detected GPU architecture(s): $gpuArch"
             }
+        }
+    } else {
+        # Try WMI detection as fallback
+        try {
+            $gpu = Get-CimInstance -ClassName Win32_VideoController | Where-Object { $_.Name -match 'AMD|Radeon|Radeon' } | Select-Object -First 1
+            if ($gpu) {
+                Write-Msg -Pt "GPU detectada via WMI: $($gpu.Name)" `
+                          -En "GPU detected via WMI: $($gpu.Name)"
+                # Map common AMD GPUs to gfx arch
+                if ($gpu.Name -match 'RX 5[67]00|Vega|VII') { $gpuArch = 'gfx906' }
+                elseif ($gpu.Name -match 'RX 5500|RX 5600|RX 5700|Navi 1[04]') { $gpuArch = 'gfx1010' }
+                elseif ($gpu.Name -match 'RX 6[45]00|RX 6600|RX 6700|RX 6800|RX 6900|Navi 2') { $gpuArch = 'gfx1030' }
+                elseif ($gpu.Name -match 'RX 7600|RX 7700|RX 7800|RX 7900|Navi 3') { $gpuArch = 'gfx1100' }
+            }
+        } catch {
+            # WMI failed, keep defaults
         }
     }
 
-    Write-Msg -Pt "Compilando com arquitetura: $gpuArch" `
-              -En "Building with architecture: $gpuArch"
+    if (-not $gpuArch) { $gpuArch = 'gfx1032' }
+    Write-Msg -Pt "Usando arquitetura(s): $gpuArch" `
+              -En "Using architecture(s): $gpuArch"
+
+    # Convert space-separated arches to --offload-arch flags
+    $gencodeFlags = ($gpuArch -split '\s+' | ForEach-Object { "--offload-arch=$_" }) -join ' '
+    Write-Msg -Pt "Compilando com arquitetura(s): $gpuArch" `
+              -En "Building with architecture(s): $gpuArch"
     
     # Create obj directory if needed
     if (-not (Test-Path "$RepoDir\obj")) {
@@ -640,7 +662,7 @@ if (-not $BuildSuccess) {
     $ErrorActionPreference = "Continue"
 
     Write-Msg -Pt "Compilando main.cpp..." -En "Compiling main.cpp..."
-    $output1 = & hipcc -O3 -ffast-math -std=c++17 -I"$RepoDir\include" -DBTC_GPU_BACKEND_HIP=1 --offload-arch=$gpuArch -c "$RepoDir\src\main.cpp" -o "$RepoDir\obj\main.o" -Wno-unused-result -Wno-ignored-attributes 2>&1
+    $output1 = & hipcc -O3 -ffast-math -std=c++17 -I"$RepoDir\include" -DBTC_GPU_BACKEND_HIP=1 $gencodeFlags -c "$RepoDir\src\main.cpp" -o "$RepoDir\obj\main.o" -Wno-unused-result -Wno-ignored-attributes 2>&1
     $exit1 = $LASTEXITCODE
     if ($exit1 -ne 0) {
         Write-Err -Pt "Falha ao compilar maincpp:" -En "Failed to compile main.cpp:"
@@ -651,7 +673,7 @@ if (-not $BuildSuccess) {
     }
 
     Write-Msg -Pt "Compilando GPUWorker.cpp..." -En "Compiling GPUWorker.cpp..."
-    $output2 = & hipcc -O3 -ffast-math -std=c++17 -I"$RepoDir\include" -DBTC_GPU_BACKEND_HIP=1 --offload-arch=$gpuArch -c "$RepoDir\src\GPUWorker.cpp" -o "$RepoDir\obj\GPUWorker.o" -Wno-unused-result -Wno-ignored-attributes 2>&1
+    $output2 = & hipcc -O3 -ffast-math -std=c++17 -I"$RepoDir\include" -DBTC_GPU_BACKEND_HIP=1 $gencodeFlags -c "$RepoDir\src\GPUWorker.cpp" -o "$RepoDir\obj\GPUWorker.o" -Wno-unused-result -Wno-ignored-attributes 2>&1
     $exit2 = $LASTEXITCODE
     if ($exit2 -ne 0) {
         Write-Err -Pt "Falha ao compilar GPUWorker.cpp:" -En "Failed to compile GPUWorker.cpp:"
@@ -662,7 +684,7 @@ if (-not $BuildSuccess) {
     }
 
     Write-Msg -Pt "Linkando..." -En "Linking..."
-    $output3 = & hipcc --offload-arch=$gpuArch "$RepoDir\obj\main.o" "$RepoDir\obj\GPUWorker.o" -o "$RepoDir\BRBtcHuntAMD.exe" 2>&1
+    $output3 = & hipcc $gencodeFlags "$RepoDir\obj\main.o" "$RepoDir\obj\GPUWorker.o" -o "$RepoDir\BRBtcHuntAMD.exe" 2>&1
     $exit3 = $LASTEXITCODE
     if ($exit3 -eq 0) {
         Write-OK -Pt "Compilacao concluida!" -En "Build completed!"
